@@ -33,7 +33,76 @@ foreach ($kandidatList as $k) {
     $totalSuaraKandidat += (int)$k['jumlah_suara'];
 }
 
-$serverIp = $_SERVER['SERVER_ADDR'] ?? gethostbyname(gethostname());
+/**
+ * Mendeteksi daftar alamat IPv4 LAN / Wi-Fi pada komputer server
+ */
+function detect_lan_ips(): array {
+    $ips = [];
+
+    // 1. Deteksi IP interface jaringan utama yang aktif melalui tabel routing OS (UDP connectionless)
+    if (function_exists('stream_socket_client') && function_exists('stream_socket_get_name')) {
+        $sock = @stream_socket_client('udp://10.254.254.254:1', $errno, $errstr, 1);
+        if ($sock) {
+            $name = @stream_socket_get_name($sock, false);
+            fclose($sock);
+            if ($name && strpos($name, ':') !== false) {
+                $ip = explode(':', $name)[0];
+                if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) && $ip !== '127.0.0.1') {
+                    $ips[] = $ip;
+                }
+            }
+        }
+    }
+
+    // 2. Ambil seluruh IPv4 dari adapter lokal
+    $hostIps = @gethostbynamel(gethostname());
+    if (is_array($hostIps)) {
+        foreach ($hostIps as $ip) {
+            if (
+                filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) &&
+                $ip !== '127.0.0.1' &&
+                strpos($ip, '169.254.') !== 0 &&
+                !in_array($ip, $ips, true)
+            ) {
+                $ips[] = $ip;
+            }
+        }
+    }
+
+    // 3. Jika diakses menggunakan IP lokal dari browser, pastikan IP tersebut masuk daftar utama
+    $srvAddr = $_SERVER['SERVER_ADDR'] ?? '';
+    if (
+        filter_var($srvAddr, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) &&
+        $srvAddr !== '127.0.0.1' &&
+        !in_array($srvAddr, $ips, true)
+    ) {
+        array_unshift($ips, $srvAddr);
+    }
+
+    // Prioritaskan IP Wi-Fi/Hotspot dibanding adapter virtual (VirtualBox 192.168.56.1)
+    usort($ips, function ($a, $b) {
+        $aVirt = ($a === '192.168.56.1') ? 1 : 0;
+        $bVirt = ($b === '192.168.56.1') ? 1 : 0;
+        return $aVirt <=> $bVirt;
+    });
+
+    if (empty($ips)) {
+        $ips[] = '127.0.0.1';
+    }
+
+    return $ips;
+}
+
+$lanIps    = detect_lan_ips();
+$primaryIp = $lanIps[0];
+
+$scheme   = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+$port     = (int)($_SERVER['SERVER_PORT'] ?? 80);
+$portPart = ($port !== 80 && $port !== 443) ? ':' . $port : '';
+$basePath = rtrim(str_replace('\\', '/', dirname(dirname($_SERVER['SCRIPT_NAME'] ?? '/'))), '/');
+
+$voterLanUrl = $scheme . '://' . $primaryIp . $portPart . $basePath . '/';
+$adminLanUrl = $scheme . '://' . $primaryIp . $portPart . $basePath . '/admin/';
 ?>
 <!DOCTYPE html>
 <html lang="id" data-theme="<?= e($pengaturan['tema']) ?>">
@@ -165,19 +234,90 @@ $serverIp = $_SERVER['SERVER_ADDR'] ?? gethostbyname(gethostname());
         </div>
       </div>
 
-      <!-- Informasi Akses Jaringan Lokal (LAN) -->
+      <!-- Informasi Sistem & Akses Jaringan Lokal (LAN / HP via Wi-Fi) -->
       <div class="panel">
         <div class="panel-header">
-          <span>Informasi Sistem &amp; Akses Jaringan Lokal (LAN)</span>
+          <span>Informasi Sistem &amp; Akses Jaringan Lokal (LAN / Wi-Fi HP)</span>
           <a href="pengaturan.php" class="btn btn-sm">Ubah Pengaturan / Tema</a>
         </div>
         <div class="panel-body">
+          <?php if ($primaryIp === '127.0.0.1'): ?>
+            <div class="alert alert-warning">
+              Komputer server saat ini belum terdeteksi terhubung ke jaringan Wi-Fi / Hotspot LAN (IP masih <code>127.0.0.1</code>). Hubungkan laptop ke Wi-Fi atau nyalakan Hotspot agar dapat diakses melalui HP.
+            </div>
+          <?php endif; ?>
+
+          <div class="grid-2" style="margin-bottom: 18px;">
+            <!-- Kartu Link Bilik Suara untuk HP / Perangkat Pemilih -->
+            <div style="padding: 16px; border: 1px solid var(--border-color); border-radius: var(--radius); background-color: var(--bg-page);">
+              <div class="stat-label" style="margin-bottom: 6px;">Link Bilik Suara (Untuk HP / Perangkat Pemilih)</div>
+              <p class="text-muted" style="font-size: 12px; margin-bottom: 10px;">
+                Buka link ini di browser HP/Tablet pemilih yang tersambung ke Wi-Fi yang sama:
+              </p>
+              <div style="padding: 10px 12px; background-color: var(--bg-surface); border: 1px solid var(--border-strong); border-radius: var(--radius); margin-bottom: 10px; word-break: break-all;">
+                <a href="<?= e($voterLanUrl) ?>" target="_blank" id="link-voter-lan" class="mono" style="font-size: 14px; font-weight: 700;">
+                  <?= e($voterLanUrl) ?>
+                </a>
+              </div>
+              <div class="filter-bar">
+                <button type="button" class="btn btn-sm btn-primary js-copy-link" data-copy="<?= e($voterLanUrl) ?>">
+                  Salin Link Bilik Suara
+                </button>
+                <a href="<?= e($voterLanUrl) ?>" target="_blank" class="btn btn-sm">
+                  Buka Bilik Suara &nearr;
+                </a>
+              </div>
+            </div>
+
+            <!-- Kartu Link Panel Admin untuk HP / Laptop Panitia -->
+            <div style="padding: 16px; border: 1px solid var(--border-color); border-radius: var(--radius); background-color: var(--bg-page);">
+              <div class="stat-label" style="margin-bottom: 6px;">Link Panel Admin (Untuk HP / Laptop Panitia)</div>
+              <p class="text-muted" style="font-size: 12px; margin-bottom: 10px;">
+                Buka link ini di HP panitia untuk memantau token dan suara dari jarak jauh:
+              </p>
+              <div style="padding: 10px 12px; background-color: var(--bg-surface); border: 1px solid var(--border-strong); border-radius: var(--radius); margin-bottom: 10px; word-break: break-all;">
+                <a href="<?= e($adminLanUrl) ?>" target="_blank" id="link-admin-lan" class="mono" style="font-size: 14px; font-weight: 700;">
+                  <?= e($adminLanUrl) ?>
+                </a>
+              </div>
+              <div class="filter-bar">
+                <button type="button" class="btn btn-sm js-copy-link" data-copy="<?= e($adminLanUrl) ?>">
+                  Salin Link Admin
+                </button>
+                <a href="<?= e($adminLanUrl) ?>" target="_blank" class="btn btn-sm">
+                  Buka Panel Admin &nearr;
+                </a>
+              </div>
+            </div>
+          </div>
+
           <div class="table-wrap">
             <table class="table">
               <tbody>
                 <tr>
-                  <th style="width: 240px;">Alamat IP Server Lokal</th>
-                  <td class="mono"><?= e($serverIp) ?></td>
+                  <th style="width: 240px;">Alamat IPv4 Server (Wi-Fi / LAN)</th>
+                  <td>
+                    <strong class="mono"><?= e($primaryIp) ?></strong>
+                    <?php if (count($lanIps) > 1): ?>
+                      <div style="margin-top: 6px; font-size: 12px;" class="text-muted">
+                        Alternatif IP Jaringan Lain yang Terdeteksi:
+                        <?php foreach (array_slice($lanIps, 1) as $altIp): ?>
+                          <?php $altUrl = $scheme . '://' . $altIp . $portPart . $basePath . '/'; ?>
+                          <div style="margin-top: 4px;">
+                            &bull; <a href="<?= e($altUrl) ?>" target="_blank" class="mono"><?= e($altUrl) ?></a>
+                          </div>
+                        <?php endforeach; ?>
+                      </div>
+                    <?php endif; ?>
+                  </td>
+                </tr>
+                <tr>
+                  <th>Panduan Akses di HP</th>
+                  <td style="font-size: 13px;">
+                    1. Sambungkan HP ke <strong>Wi-Fi atau Hotspot yang sama</strong> dengan laptop server ini.<br>
+                    2. Ketik atau tempel link <strong><?= e($voterLanUrl) ?></strong> pada browser HP (Chrome/Safari).<br>
+                    3. <span class="text-muted">Jika halaman tidak merespons di HP, pastikan <em>Apache HTTP Server</em> diizinkan pada Windows Firewall (Private &amp; Public Network).</span>
+                  </td>
                 </tr>
                 <tr>
                   <th>Tema Antarmuka Aktif</th>
@@ -187,14 +327,10 @@ $serverIp = $_SERVER['SERVER_ADDR'] ?? gethostbyname(gethostname());
                   </td>
                 </tr>
                 <tr>
-                  <th>Kerahasiaan Suara</th>
-                  <td>Aktif (Tanpa relasi token ke kandidat / LUBER JURDIL)</td>
-                </tr>
-                <tr>
                   <th>Wizard Instalasi (<code>install.php</code>)</th>
                   <td>
                     <span class="badge">Terkunci (<code>installed.lock</code>)</span>
-                    <a href="pengaturan.php#panel-installer" class="btn btn-sm" style="margin-left: 8px;">Buka Kunci / Instal Ulang</a>
+                    <a href="pengaturan.php#panel-installer" class="btn btn-sm" style="margin-left: 8px;">Reset Total / Instal Ulang</a>
                   </td>
                 </tr>
               </tbody>
@@ -204,5 +340,30 @@ $serverIp = $_SERVER['SERVER_ADDR'] ?? gethostbyname(gethostname());
       </div>
     </main>
   </div>
+  <script>
+    (function () {
+      document.querySelectorAll('.js-copy-link').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var url = btn.getAttribute('data-copy') || '';
+          var originalText = btn.textContent;
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(url).then(function () {
+              btn.textContent = 'Link Tersalin!';
+              setTimeout(function () { btn.textContent = originalText; }, 1800);
+            });
+          } else {
+            var temp = document.createElement('input');
+            document.body.appendChild(temp);
+            temp.value = url;
+            temp.select();
+            document.execCommand('copy');
+            document.body.removeChild(temp);
+            btn.textContent = 'Link Tersalin!';
+            setTimeout(function () { btn.textContent = originalText; }, 1800);
+          }
+        });
+      });
+    })();
+  </script>
 </body>
 </html>
