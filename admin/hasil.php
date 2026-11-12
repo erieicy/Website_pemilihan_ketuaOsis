@@ -7,16 +7,19 @@
 require_once dirname(__DIR__) . '/config/database.php';
 require_admin();
 
-$message = '';
+$message = $_SESSION['flash_hasil_msg'] ?? '';
+unset($_SESSION['flash_hasil_msg']);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'toggle_lock') {
     if (verify_csrf($_POST['csrf_token'] ?? '')) {
         $newState = (int)($_POST['tampilkan_hasil'] ?? 0) === 1 ? 1 : 0;
         $stmtUpd  = $pdo->prepare('UPDATE pengaturan SET tampilkan_hasil = ? WHERE id = 1');
         $stmtUpd->execute([$newState]);
-        $message = $newState === 1
+        $_SESSION['flash_hasil_msg'] = $newState === 1
             ? 'Hasil perhitungan suara dibuka dan ditampilkan di layar.'
             : 'Hasil perhitungan suara berhasil dikunci (disembunyikan).';
+        header('Location: hasil.php');
+        exit;
     }
 }
 

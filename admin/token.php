@@ -8,8 +8,9 @@ require_once dirname(__DIR__) . '/config/database.php';
 require_admin();
 
 $pengaturan = get_pengaturan($pdo);
-$message    = '';
-$error      = '';
+$message    = $_SESSION['flash_token_msg'] ?? '';
+$error      = $_SESSION['flash_token_err'] ?? '';
+unset($_SESSION['flash_token_msg'], $_SESSION['flash_token_err']);
 
 /**
  * Menghasilkan 1 kode token 6 karakter alfanumerik kapital tanpa O, 0, I, 1
@@ -25,8 +26,11 @@ function generate_single_token(): string {
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $postMsg = '';
+    $postErr = '';
+
     if (!verify_csrf($_POST['csrf_token'] ?? '')) {
-        $error = 'Token keamanan tidak valid.';
+        $postErr = 'Token keamanan tidak valid.';
     } else {
         $action = $_POST['action'] ?? '';
 
@@ -34,7 +38,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($action === 'generate') {
             $jumlah = (int)($_POST['jumlah_token'] ?? 0);
             if ($jumlah < 1 || $jumlah > 1000) {
-                $error = 'Jumlah pembuatan token harus antara 1 sampai 1.000 per eksekusi.';
+                $postErr = 'Jumlah pembuatan token harus antara 1 sampai 1.000 per eksekusi.';
             } else {
                 try {
                     $pdo->beginTransaction();
@@ -53,12 +57,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
 
                     $pdo->commit();
-                    $message = "Berhasil membuat {$inserted} kode token unik baru.";
+                    $postMsg = "Berhasil membuat {$inserted} kode token unik baru.";
                 } catch (Exception $e) {
                     if ($pdo->inTransaction()) {
                         $pdo->rollBack();
                     }
-                    $error = 'Gagal membuat token: ' . $e->getMessage();
+                    $postErr = 'Gagal membuat token: ' . $e->getMessage();
                 }
             }
         }
@@ -69,18 +73,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmtDel = $pdo->prepare('DELETE FROM tokens WHERE id = ? AND sudah_dipakai = 0');
             $stmtDel->execute([$idToken]);
             if ($stmtDel->rowCount() === 1) {
-                $message = 'Kode token yang belum terpakai berhasil dihapus.';
+                $postMsg = 'Kode token yang belum terpakai berhasil dihapus.';
             } else {
-                $error = 'Token yang sudah dipakai memilih tidak dapat dihapus secara satuan.';
+                $postErr = 'Token yang sudah dipakai memilih tidak dapat dihapus secara satuan.';
             }
         }
 
         // 3. Hapus Seluruh Token yang Belum Dipakai
         elseif ($action === 'delete_unused') {
             $stmtDel = $pdo->exec('DELETE FROM tokens WHERE sudah_dipakai = 0');
-            $message = "Berhasil menghapus {$stmtDel} token yang belum terpakai.";
+            $postMsg = "Berhasil menghapus {$stmtDel} token yang belum terpakai.";
         }
     }
+
+    if ($postMsg !== '') {
+        $_SESSION['flash_token_msg'] = $postMsg;
+    }
+    if ($postErr !== '') {
+        $_SESSION['flash_token_err'] = $postErr;
+    }
+
+    // Redirect (Post/Redirect/Get) agar saat halaman di-refresh (F5) tidak menambah token otomatis
+    header('Location: token.php');
+    exit;
 }
 
 // Statistik Ringkas Token

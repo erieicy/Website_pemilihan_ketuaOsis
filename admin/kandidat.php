@@ -10,8 +10,9 @@ require_admin();
 $pengaturan = get_pengaturan($pdo);
 $uploadDir  = dirname(__DIR__) . '/assets/uploads/';
 
-$message = '';
-$error   = '';
+$message = $_SESSION['flash_kandidat_msg'] ?? '';
+$error   = $_SESSION['flash_kandidat_err'] ?? '';
+unset($_SESSION['flash_kandidat_msg'], $_SESSION['flash_kandidat_err']);
 
 /**
  * Membersihkan string menjadi slug nama file yang aman (tanpa ekstensi)
@@ -55,7 +56,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'delet
             delete_old_photo($uploadDir, $rowOld['nama_file_foto']);
             $stmtDel = $pdo->prepare('DELETE FROM kandidat WHERE id = ?');
             $stmtDel->execute([$idHapus]);
-            $message = 'Data kandidat dan file foto berhasil dihapus.';
+            $_SESSION['flash_kandidat_msg'] = 'Data kandidat dan file foto berhasil dihapus.';
+            header('Location: kandidat.php');
+            exit;
         }
     }
 }
@@ -160,15 +163,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save'
                         WHERE id = ?
                     ');
                     $stmtUpd->execute([$noUrut, $namaKetua, $namaWakil, $finalFileName, $visi, $misi, $idEdit]);
-                    $message = 'Data kandidat berhasil diperbarui.';
+                    $_SESSION['flash_kandidat_msg'] = 'Data kandidat berhasil diperbarui.';
                 } else {
                     $stmtIns = $pdo->prepare('
                         INSERT INTO kandidat (no_urut, nama_ketua, nama_wakil, nama_file_foto, visi, misi, jumlah_suara)
                         VALUES (?, ?, ?, ?, ?, ?, 0)
                     ');
                     $stmtIns->execute([$noUrut, $namaKetua, $namaWakil, $finalFileName, $visi, $misi]);
-                    $message = 'Kandidat baru berhasil ditambahkan.';
+                    $_SESSION['flash_kandidat_msg'] = 'Kandidat baru berhasil ditambahkan.';
                 }
+                header('Location: kandidat.php');
+                exit;
             }
         }
     }

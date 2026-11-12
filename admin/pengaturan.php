@@ -7,8 +7,9 @@
 require_once dirname(__DIR__) . '/config/database.php';
 require_admin();
 
-$message = '';
-$error   = '';
+$message = $_SESSION['flash_pengaturan_msg'] ?? '';
+$error   = $_SESSION['flash_pengaturan_err'] ?? '';
+unset($_SESSION['flash_pengaturan_msg'], $_SESSION['flash_pengaturan_err']);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf($_POST['csrf_token'] ?? '')) {
@@ -121,6 +122,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     }
+
+    if ($message !== '') {
+        $_SESSION['flash_pengaturan_msg'] = $message;
+    }
+    if ($error !== '') {
+        $_SESSION['flash_pengaturan_err'] = $error;
+    }
+    header('Location: pengaturan.php');
+    exit;
 }
 
 $pengaturan = get_pengaturan($pdo);
