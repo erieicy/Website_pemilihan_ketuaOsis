@@ -100,7 +100,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
-        // 4. Buka Kunci install.php (Hapus installed.lock dengan Konfirmasi Password Admin)
+        // 4. Buka Kunci install.php & Reset Total Sistem dari Awal (Factory Reset)
         elseif ($action === 'unlock_installer') {
             $passInstall = $_POST['password_install'] ?? '';
 
@@ -109,14 +109,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $adminRow = $stmtAdm->fetch();
 
             if (!$adminRow || !password_verify($passInstall, $adminRow['password'])) {
-                $error = 'Password konfirmasi salah! Pembukaan kunci install.php dibatalkan.';
+                $error = 'Password konfirmasi salah! Reset total ke install.php dibatalkan.';
             } else {
-                $lockFilePath = dirname(__DIR__) . '/installed.lock';
-                if (file_exists($lockFilePath)) {
-                    @unlink($lockFilePath);
+                try {
+                    reset_system_to_initial($pdo, dirname(__DIR__));
+                    header('Location: ../install.php');
+                    exit;
+                } catch (Exception $e) {
+                    $error = 'Gagal mereset sistem ke awal: ' . $e->getMessage();
                 }
-                header('Location: ../install.php');
-                exit;
             }
         }
     }
@@ -240,14 +241,14 @@ $pengaturan = get_pengaturan($pdo);
             </div>
           </div>
 
-          <!-- Panel Buka Kunci install.php (Hapus installed.lock dengan Password Admin) -->
-          <div id="panel-installer" class="panel">
-            <div class="panel-header">
-              <span>Buka Kunci &amp; Akses Halaman <code>install.php</code></span>
+          <!-- Panel Buka Kunci install.php & Reset Total Sistem dari Awal -->
+          <div id="panel-installer" class="panel" style="border-color: var(--danger-border);">
+            <div class="panel-header" style="background-color: var(--danger-bg); color: var(--danger);">
+              <span>Buka Kunci &amp; Instal Ulang Sistem dari Awal (<code>install.php</code>)</span>
             </div>
             <div class="panel-body">
               <p class="text-muted" style="font-size: 13px; margin-bottom: 14px;">
-                Menghapus file pengunci <code>installed.lock</code> secara otomatis dan membuka kembali halaman wizard <code>install.php</code>. Wajib memasukkan password Admin untuk mencegah penghapusan sembarangan.
+                Tindakan ini akan <strong>menghapus seluruh tabel database (pengaturan sekolah, akun admin, kandidat, foto kandidat, &amp; token)</strong>, menghapus file <code>config.php</code> serta <code>installed.lock</code>, dan mengembalikan sistem ke halaman <code>install.php</code> seperti baru pertama kali diinstal.
               </p>
               <form method="post" action="pengaturan.php" autocomplete="off">
                 <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
@@ -265,10 +266,10 @@ $pengaturan = get_pengaturan($pdo);
                 </div>
                 <button
                   type="submit"
-                  class="btn btn-block js-confirm"
-                  data-confirm="File installed.lock akan dihapus dan Anda akan diarahkan ke halaman install.php. Lanjutkan?"
+                  class="btn btn-danger btn-block js-confirm"
+                  data-confirm="PERINGATAN KERAS: Seluruh data (kandidat, foto, token, akun admin, dan pengaturan) akan dihapus total dari awal dan diarahkan ke install.php. Lanjutkan?"
                 >
-                  Hapus Kunci &amp; Buka Halaman install.php
+                  Reset Total &amp; Buka Halaman install.php
                 </button>
               </form>
             </div>
@@ -341,7 +342,7 @@ $pengaturan = get_pengaturan($pdo);
           <!-- 3. Reset Data Simulasi (FR-12) -->
           <div class="panel" style="border-color: var(--danger-border);">
             <div class="panel-header" style="background-color: var(--danger-bg); color: var(--danger);">
-              <span>Reset Data Simulasi / Uji Coba</span>
+              <span>Reset Data</span>
             </div>
             <div class="panel-body">
               <p class="text-muted" style="font-size: 13px; margin-bottom: 14px;">

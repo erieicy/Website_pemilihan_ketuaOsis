@@ -13,6 +13,13 @@ date_default_timezone_set('Asia/Jakarta');
 $configFile = __DIR__ . '/config.php';
 $lockFile   = dirname(__DIR__) . '/installed.lock';
 
+// Jika belum terinstal (installed.lock tidak ada), arahkan langsung ke install.php
+if (!file_exists($lockFile)) {
+    $inAdmin = (basename(dirname($_SERVER['SCRIPT_NAME'] ?? '')) === 'admin');
+    header('Location: ' . ($inAdmin ? '../install.php' : 'install.php'));
+    exit;
+}
+
 if (file_exists($configFile)) {
     require_once $configFile;
 } else {
@@ -56,6 +63,48 @@ function require_admin(): void {
     }
 }
 
+/**
+ * Menghapus seluruh data sistem kembali ke kondisi awal (Factory Reset ke install.php):
+ * - Menghapus seluruh foto unggahan di assets/uploads/ (kecuali default-candidate.png & .gitkeep)
+ * - Menghapus seluruh tabel database (tokens, kandidat, admin, pengaturan)
+ * - Menghapus config/config.php dan installed.lock
+ * - Menghapus seluruh sesi login aktif
+ */
+function reset_system_to_initial(PDO $pdo, string $rootDir): void {
+    // 1. Bersihkan file foto unggahan kandidat
+    $uploadDir = rtrim($rootDir, '/\\') . '/assets/uploads';
+    if (is_dir($uploadDir)) {
+        foreach (scandir($uploadDir) as $item) {
+            if ($item === '.' || $item === '..' || $item === '.gitkeep' || $item === 'default-candidate.png') {
+                continue;
+            }
+            $filePath = $uploadDir . '/' . $item;
+            if (is_file($filePath)) {
+                @unlink($filePath);
+            }
+        }
+    }
+
+    // 2. Hapus seluruh tabel di database agar benar-benar kembali dari nol
+    $pdo->exec('DROP TABLE IF EXISTS `tokens`, `kandidat`, `admin`, `pengaturan`');
+
+    // 3. Hapus file konfigurasi & file pengunci instalasi
+    $cfgPath  = rtrim($rootDir, '/\\') . '/config/config.php';
+    $lockPath = rtrim($rootDir, '/\\') . '/installed.lock';
+    if (file_exists($cfgPath)) {
+        @unlink($cfgPath);
+    }
+    if (file_exists($lockPath)) {
+        @unlink($lockPath);
+    }
+
+    // 4. Hentikan seluruh sesi login Admin maupun Pemilih
+    $_SESSION = [];
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_destroy();
+    }
+}
+
 try {
     $dsn = 'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=utf8mb4';
     $pdo = new PDO($dsn, DB_USER, DB_PASS, [
@@ -79,7 +128,7 @@ try {
 function get_pengaturan(PDO $pdo): array {
     $defaults = [
         'id'              => 1,
-        'nama_sekolah'    => 'SMA Negeri 1 Harapan',
+        'nama_sekolah'    => '',
         'periode'         => '2026/2027',
         'status_voting'   => 'buka',
         'tampilkan_hasil' => 0,
@@ -97,12 +146,9 @@ function get_pengaturan(PDO $pdo): array {
             return array_merge($defaults, $row);
         }
     } catch (PDOException $e) {
-        // Jika tabel belum dibuat dan belum terkunci, arahkan ke installer
-        if (!file_exists(dirname(__DIR__) . '/installed.lock')) {
-            $inAdmin = (basename(dirname($_SERVER['SCRIPT_NAME'] ?? '')) === 'admin');
-            header('Location: ' . ($inAdmin ? '../install.php' : 'install.php'));
-            exit;
-        }
+        $inAdmin = (basename(dirname($_SERVER['SCRIPT_NAME'] ?? '')) === 'admin');
+        header('Location: ' . ($inAdmin ? '../install.php' : 'install.php'));
+        exit;
     }
 
     return $defaults;

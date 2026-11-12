@@ -12,7 +12,7 @@ SET time_zone = "+07:00";
 -- ----------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `pengaturan` (
   `id` int(11) NOT NULL,
-  `nama_sekolah` varchar(150) NOT NULL DEFAULT 'SMA Negeri 1 Harapan',
+  `nama_sekolah` varchar(150) NOT NULL DEFAULT 'SMA Negeri 1',
   `periode` varchar(20) NOT NULL DEFAULT '2026/2027',
   `status_voting` enum('buka','tutup') NOT NULL DEFAULT 'buka',
   `tampilkan_hasil` tinyint(1) NOT NULL DEFAULT 0,
@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS `pengaturan` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 INSERT INTO `pengaturan` (`id`, `nama_sekolah`, `periode`, `status_voting`, `tampilkan_hasil`, `tema`)
-VALUES (1, 'SMA Negeri 1 Harapan', '2026/2027', 'buka', 0, 'light')
+VALUES (1, 'SMA Negeri 1', '2026/2027', 'buka', 0, 'light')
 ON DUPLICATE KEY UPDATE `id` = `id`;
 
 -- ----------------------------------------------------------
