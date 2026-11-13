@@ -50,49 +50,58 @@ function install_verify_csrf(?string $token): bool {
     return !empty($_SESSION['csrf_token']) && !empty($token) && hash_equals($_SESSION['csrf_token'], $token);
 }
 
-function install_check_rate_limit(string $bucket, int $maxAttempts = 5, int $windowSeconds = 60): int {
-    $now  = time();
+function install_get_rate_limit_data(string $bucket, int $maxAttempts, int $now): array {
     $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
     $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
-    $data = ['count' => 0, 'expires' => $now + $windowSeconds];
+    $default = ['count' => 0, 'expires' => 0, 'window_expires' => 0];
     if (is_file($file)) {
         $raw = @file_get_contents($file);
         $dec = $raw ? @json_decode($raw, true) : null;
-        if (is_array($dec) && isset($dec['count'], $dec['expires']) && $dec['expires'] > $now) {
-            $data = $dec;
+        if (is_array($dec) && isset($dec['count'], $dec['expires'])) {
+            $count   = (int)($dec['count'] ?? 0);
+            $expires = (int)($dec['expires'] ?? 0);
+            $winExp  = (int)($dec['window_expires'] ?? $expires);
+            $isActive = ($count >= $maxAttempts) ? ($expires > $now) : ($winExp > $now);
+            if ($isActive) {
+                return ['count' => $count, 'expires' => $expires, 'window_expires' => $winExp];
+            }
         }
     }
-    if ($data['count'] >= $maxAttempts) {
+    return $default;
+}
+
+function install_check_rate_limit(string $bucket, int $maxAttempts = 5, int $lockoutSeconds = 30): int {
+    $now  = time();
+    $data = install_get_rate_limit_data($bucket, $maxAttempts, $now);
+    if ($data['count'] >= $maxAttempts && $data['expires'] > $now) {
         return max(1, (int)($data['expires'] - $now));
     }
     return 0;
 }
 
-function install_record_failed(string $bucket, int $windowSeconds = 60): void {
+function install_record_failed(string $bucket, int $lockoutSeconds = 30, int $maxAttempts = 5): int {
     $now  = time();
     $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
     $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
-    $data = ['count' => 0, 'expires' => $now + $windowSeconds];
-    if (is_file($file)) {
-        $raw = @file_get_contents($file);
-        $dec = $raw ? @json_decode($raw, true) : null;
-        if (is_array($dec) && isset($dec['count'], $dec['expires']) && $dec['expires'] > $now) {
-            $data = $dec;
-        }
-    }
+    $data = install_get_rate_limit_data($bucket, $maxAttempts, $now);
     $data['count']++;
-    if ($data['count'] === 1) {
-        $data['expires'] = $now + $windowSeconds;
-    }
+    $data['window_expires'] = $now + max(60, $lockoutSeconds);
+    $data['expires']        = $now + $lockoutSeconds;
     @file_put_contents($file, json_encode($data), LOCK_EX);
+    if ($data['count'] >= $maxAttempts) {
+        return $lockoutSeconds;
+    }
+    return 0;
 }
 
 function install_clear_rate_limit(string $bucket): void {
     $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
     $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
     if (is_file($file)) {
+        @file_put_contents($file, json_encode(['count' => 0, 'expires' => 0, 'window_expires' => 0]), LOCK_EX);
         @unlink($file);
     }
+    unset($_SESSION['rl_' . $bucket]);
 }
 
 /**
@@ -119,17 +128,18 @@ $form = [
     'db_user'      => trim($_POST['db_user'] ?? 'root'),
     'db_pass'      => $_POST['db_pass'] ?? '',
     'db_name'      => trim($_POST['db_name'] ?? 'db_evoting_osis'),
-    'nama_sekolah' => trim($_POST['nama_sekolah'] ?? 'SMA Negeri 1 Harapan'),
-    'periode'      => trim($_POST['periode'] ?? '2026/2027'),
+    'nama_sekolah' => trim($_POST['nama_sekolah'] ?? ''),
+    'periode'      => trim($_POST['periode'] ?? ''),
     'tema'         => ($_POST['tema'] ?? 'light') === 'dark' ? 'dark' : 'light',
-    'admin_nama'   => trim($_POST['admin_nama'] ?? 'Panitia Pemilihan (MPK)'),
-    'admin_user'   => trim($_POST['admin_user'] ?? 'admin'),
+    'admin_nama'   => trim($_POST['admin_nama'] ?? 'Majelis Perwakilan Kelas (MPK)'),
+    'admin_user'   => trim($_POST['admin_user'] ?? ''),
     'admin_pass'   => $_POST['admin_pass'] ?? '',
 ];
 
+$waitSec = $isLocked ? install_check_rate_limit('install_unlock', 5, 30) : 0;
+
 // Proses Buka Kunci & Reset Total Sistem menggunakan Username + Password Admin + CSRF + Rate Limit (BUG-SEC-01)
 if ($isLocked && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'unlock_install') {
-    $waitSec = install_check_rate_limit('install_unlock', 5, 60);
     if ($waitSec > 0) {
         $error = "Terlalu banyak percobaan gagal. Silakan tunggu {$waitSec} detik.";
     } elseif (!install_verify_csrf($_POST['csrf_token'] ?? '')) {
@@ -175,9 +185,14 @@ if ($isLocked && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '
                     $_SESSION = [];
                     session_regenerate_id(true);
                     $isLocked = false;
+                    $waitSec  = 0;
                 } else {
-                    install_record_failed('install_unlock', 60);
-                    $error = 'Username atau password Administrator salah! Sistem tidak dapat direset.';
+                    $waitSec = install_record_failed('install_unlock', 30, 5);
+                    if ($waitSec > 0) {
+                        $error = "Terlalu banyak percobaan gagal. Silakan tunggu {$waitSec} detik.";
+                    } else {
+                        $error = 'Username atau password Administrator salah! Sistem tidak dapat direset.';
+                    }
                 }
             } catch (Exception $e) {
                 error_log('Install unlock error: ' . $e->getMessage());
@@ -235,8 +250,8 @@ if (!$isLocked && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? 
                 $pdo->exec("
                     CREATE TABLE `pengaturan` (
                       `id` int(11) NOT NULL,
-                      `nama_sekolah` varchar(150) NOT NULL DEFAULT 'SMA Negeri 1 Harapan',
-                      `periode` varchar(20) NOT NULL DEFAULT '2026/2027',
+                      `nama_sekolah` varchar(150) NOT NULL DEFAULT 'SMA Negeri 1',
+                      `periode` varchar(20) NOT NULL DEFAULT '',
                       `status_voting` enum('buka','tutup') NOT NULL DEFAULT 'buka',
                       `tampilkan_hasil` tinyint(1) NOT NULL DEFAULT 0,
                       `tema` enum('light','dark') NOT NULL DEFAULT 'light',
@@ -358,7 +373,11 @@ if (!$isLocked && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? 
         </div>
 
       <?php elseif ($isLocked): ?>
-        <?php if ($error !== ''): ?>
+        <?php if ($waitSec > 0): ?>
+          <div class="alert alert-error" id="rl-alert">
+            Terlalu banyak percobaan gagal. Silakan tunggu <strong id="rl-countdown" class="mono" data-wait="<?= (int)$waitSec ?>"><?= (int)$waitSec ?></strong> detik.
+          </div>
+        <?php elseif ($error !== ''): ?>
           <div class="alert alert-error"><?= h($error) ?></div>
         <?php endif; ?>
 
@@ -388,6 +407,7 @@ if (!$isLocked && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? 
                 class="form-control mono"
                 maxlength="50"
                 placeholder="Username Admin"
+                <?= $waitSec > 0 ? 'disabled' : '' ?>
                 required
               >
             </div>
@@ -399,16 +419,19 @@ if (!$isLocked && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? 
                 name="unlock_password"
                 class="form-control"
                 placeholder="Password Admin"
+                <?= $waitSec > 0 ? 'disabled' : '' ?>
                 required
               >
             </div>
           </div>
           <button
             type="submit"
+            id="btn-unlock-install"
             class="btn btn-danger btn-block js-confirm"
             data-confirm="PERINGATAN KERAS: Seluruh data lama (kandidat, foto, token, admin, dan pengaturan) akan dihapus total dari awal. Lanjutkan?"
+            <?= $waitSec > 0 ? 'disabled' : '' ?>
           >
-            Reset Total &amp; Buka Wizard install.php
+            <?= $waitSec > 0 ? 'Tunggu ' . (int)$waitSec . ' Detik...' : 'Reset Total &amp; Buka Wizard install.php' ?>
           </button>
         </form>
 
@@ -445,12 +468,12 @@ if (!$isLocked && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? 
             <div class="install-section-title">2. Identitas Sekolah &amp; Tema UI</div>
             <div class="form-group">
               <label class="form-label" for="nama_sekolah">Nama Sekolah</label>
-              <input type="text" id="nama_sekolah" name="nama_sekolah" class="form-control" maxlength="150" value="<?= h($form['nama_sekolah']) ?>" required>
+              <input type="text" id="nama_sekolah" name="nama_sekolah" class="form-control" maxlength="150" value="<?= h($form['nama_sekolah']) ?>" placeholder="Masukkan Nama Sekolah" required>
             </div>
             <div class="install-grid">
               <div class="form-group">
                 <label class="form-label" for="periode">Periode Kepengurusan</label>
-                <input type="text" id="periode" name="periode" class="form-control" maxlength="20" value="<?= h($form['periode']) ?>" placeholder="2026/2027" required>
+                <input type="text" id="periode" name="periode" class="form-control" maxlength="20" value="<?= h($form['periode']) ?>" placeholder="Masukkan Tahun" required>
               </div>
               <div class="form-group">
                 <label class="form-label" for="tema">Tema Tampilan Awal</label>
@@ -472,7 +495,7 @@ if (!$isLocked && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? 
             <div class="install-grid">
               <div class="form-group">
                 <label class="form-label" for="admin_user">Username Login</label>
-                <input type="text" id="admin_user" name="admin_user" class="form-control mono" maxlength="50" value="<?= h($form['admin_user']) ?>" required>
+                <input type="text" id="admin_user" name="admin_user" class="form-control mono" maxlength="50" value="<?= h($form['admin_user']) ?>" placeholder="Masukkan Username" required>
               </div>
               <div class="form-group">
                 <label class="form-label" for="admin_pass">Password Login</label>
@@ -492,5 +515,37 @@ if (!$isLocked && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? 
     </div>
   </div>
   <script src="assets/js/admin.js"></script>
+  <script>
+    (function () {
+      var rlCountdown = document.getElementById('rl-countdown');
+      var rlAlert     = document.getElementById('rl-alert');
+      var userInp     = document.getElementById('unlock_username');
+      var passInp     = document.getElementById('unlock_password');
+      var unlockBtn   = document.getElementById('btn-unlock-install');
+
+      if (!rlCountdown) return;
+      var rem = parseInt(rlCountdown.getAttribute('data-wait') || rlCountdown.textContent, 10) || 0;
+      if (rem <= 0) return;
+
+      var rlTimer = setInterval(function () {
+        rem -= 1;
+        if (rem <= 0) {
+          clearInterval(rlTimer);
+          if (rlAlert) rlAlert.style.display = 'none';
+          if (userInp) userInp.disabled = false;
+          if (passInp) passInp.disabled = false;
+          if (unlockBtn) {
+            unlockBtn.disabled = false;
+            unlockBtn.textContent = 'Reset Total & Buka Wizard install.php';
+          }
+        } else {
+          rlCountdown.textContent = String(rem);
+          if (unlockBtn) {
+            unlockBtn.textContent = 'Tunggu ' + rem + ' Detik...';
+          }
+        }
+      }, 1000);
+    })();
+  </script>
 </body>
 </html>

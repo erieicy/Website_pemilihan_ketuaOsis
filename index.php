@@ -20,6 +20,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'kelua
 $pengaturan = get_pengaturan($pdo);
 $isOpen     = ($pengaturan['status_voting'] === 'buka');
 
+// Endpoint ringan status bilik suara agar layar pemilih otomatis sinkron saat voting dibuka/ditutup
+if (isset($_GET['status_check'])) {
+    session_write_close();
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    echo json_encode([
+        'status_voting' => $pengaturan['status_voting'],
+        'tema'          => $pengaturan['tema'],
+    ]);
+    exit;
+}
+
 // Jika pemilih sudah memiliki sesi token aktif yang belum dipakai, arahkan ke bilik suara
 if ($isOpen && !empty($_SESSION['voter_token'])) {
     $stmtCheck = $pdo->prepare('SELECT sudah_dipakai FROM tokens WHERE kode_token = ? LIMIT 1');
@@ -36,9 +48,9 @@ $error = $_SESSION['voter_error'] ?? '';
 unset($_SESSION['voter_error']);
 
 $inputToken = '';
+$waitSec    = $isOpen ? check_rate_limit('voter_token', 5, 5) : 0;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isOpen && ($_POST['action'] ?? '') !== 'keluar') {
-    $waitSec = check_rate_limit('voter_token', 8, 60);
     if ($waitSec > 0) {
         $error = "Terlalu banyak percobaan kode token yang gagal. Silakan tunggu {$waitSec} detik.";
     } elseif (!verify_csrf($_POST['csrf_token'] ?? '')) {
@@ -56,14 +68,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isOpen && ($_POST['action'] ?? '')
 
             if (!$row) {
                 // Kondisi A: Token tidak ditemukan
-                record_failed_attempt('voter_token', 60);
-                $error = 'Kode tidak terdaftar! Periksa kembali ketikan Anda.';
+                $waitSec = record_failed_attempt('voter_token', 5, 5);
+                if ($waitSec > 0) {
+                    $error = "Terlalu banyak percobaan kode token yang gagal. Silakan tunggu {$waitSec} detik.";
+                } else {
+                    $error = 'Kode tidak terdaftar! Periksa kembali ketikan Anda.';
+                }
             } elseif ((int)$row['sudah_dipakai'] === 1) {
                 // Kondisi B: Token sudah pernah dipakai
-                record_failed_attempt('voter_token', 60);
-                $error = 'Kode ini sudah pernah digunakan dan tidak berlaku lagi!';
+                $waitSec = record_failed_attempt('voter_token', 5, 5);
+                if ($waitSec > 0) {
+                    $error = "Terlalu banyak percobaan kode token yang gagal. Silakan tunggu {$waitSec} detik.";
+                } else {
+                    $error = 'Kode ini sudah pernah digunakan dan tidak berlaku lagi!';
+                }
             } else {
-                // Kondisi C: Token sah dan belum dipakai (Regenerasi ID Sesi - BUG-SEC-03)
+                // Kondisi C: Token sah dan belum dipakai (Reset Rate Limit & Regenerasi ID Sesi)
                 clear_rate_limit('voter_token');
                 session_regenerate_id(true);
                 $_SESSION['voter_token'] = $row['kode_token'];
@@ -92,7 +112,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isOpen && ($_POST['action'] ?? '')
         <p class="auth-subtitle">Periode Pemilihan <?= e($pengaturan['periode']) ?></p>
       </div>
 
-      <?php if ($error !== ''): ?>
+      <?php if ($waitSec > 0): ?>
+        <div class="alert alert-error" id="rl-alert">
+          Terlalu banyak percobaan kode token yang gagal. Silakan tunggu <strong id="rl-countdown" class="mono" data-wait="<?= (int)$waitSec ?>"><?= (int)$waitSec ?></strong> detik.
+        </div>
+      <?php elseif ($error !== ''): ?>
         <div class="alert alert-error"><?= e($error) ?></div>
       <?php endif; ?>
 
@@ -116,14 +140,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isOpen && ($_POST['action'] ?? '')
               maxlength="6"
               placeholder="XXXXXX"
               value="<?= e($inputToken) ?>"
-              autofocus
+              <?= $waitSec > 0 ? 'disabled' : 'autofocus' ?>
               required
             >
             <span class="form-hint" style="text-align: center;">
               Ketik 6 karakter kode pada kertas token dari panitia.
             </span>
           </div>
-          <button type="submit" class="btn btn-primary btn-block">Masuk Bilik Suara</button>
+          <button type="submit" id="btn-submit-token" class="btn btn-primary btn-block" <?= $waitSec > 0 ? 'disabled' : '' ?>>
+            <?= $waitSec > 0 ? 'Tunggu ' . (int)$waitSec . ' Detik...' : 'Masuk Bilik Suara' ?>
+          </button>
         </form>
       <?php endif; ?>
 
@@ -135,7 +161,97 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isOpen && ($_POST['action'] ?? '')
   </div>
   <script>
     (function () {
-      var input = document.getElementById('kode_token');
+      var input       = document.getElementById('kode_token');
+      var submitBtn   = document.getElementById('btn-submit-token');
+      var rlCountdown = document.getElementById('rl-countdown');
+      var rlAlert     = document.getElementById('rl-alert');
+
+      if (rlCountdown) {
+        var rem = parseInt(rlCountdown.getAttribute('data-wait') || rlCountdown.textContent, 10) || 0;
+        if (rem > 0) {
+          if (input) input.disabled = true;
+          if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Tunggu ' + rem + ' Detik...';
+          }
+          var rlTimer = setInterval(function () {
+            rem -= 1;
+            if (rem <= 0) {
+              clearInterval(rlTimer);
+              if (rlAlert) rlAlert.style.display = 'none';
+              if (input) {
+                input.disabled = false;
+                input.focus();
+              }
+              if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Masuk Bilik Suara';
+              }
+            } else {
+              rlCountdown.textContent = String(rem);
+              if (submitBtn) {
+                submitBtn.textContent = 'Tunggu ' + rem + ' Detik...';
+              }
+            }
+          }, 1000);
+        }
+      }
+
+      // Sinkronisasi otomatis status bilik suara (buka/tutup) & tema tanpa perlu refresh manual
+      (function () {
+        var initialStatus = <?= json_encode($pengaturan['status_voting']) ?>;
+        var timer = null;
+        var inFlight = false;
+
+        function checkBoothStatus() {
+          if (document.hidden || inFlight) return;
+          inFlight = true;
+          fetch('index.php?status_check=1&_t=' + Date.now(), { cache: 'no-store', credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) {
+              if (!d) return;
+              if (d.tema) {
+                document.documentElement.setAttribute('data-theme', d.tema);
+              }
+              if (d.status_voting && d.status_voting !== initialStatus) {
+                window.location.href = 'index.php';
+              }
+            })
+            .catch(function () {})
+            .finally(function () {
+              inFlight = false;
+              if (!document.hidden) {
+                clearTimeout(timer);
+                timer = setTimeout(checkBoothStatus, 3000);
+              }
+            });
+        }
+
+        document.addEventListener('visibilitychange', function () {
+          if (!document.hidden) {
+            clearTimeout(timer);
+            checkBoothStatus();
+          }
+        });
+        try {
+          if (window.BroadcastChannel) {
+            var ch = new BroadcastChannel('evoting_updates');
+            ch.addEventListener('message', function () {
+              clearTimeout(timer);
+              checkBoothStatus();
+            });
+          }
+        } catch (_) {}
+        window.addEventListener('storage', function (e) {
+          if (e.key === 'evoting_last_update') {
+            clearTimeout(timer);
+            checkBoothStatus();
+          }
+        });
+
+        timer = setTimeout(checkBoothStatus, 3000);
+      })();
+
       if (!input) return;
 
       input.addEventListener('paste', function (e) {

@@ -160,13 +160,141 @@
     });
   });
 
-  // 4. Konfirmasi Aksi Hapus Umum
-  document.querySelectorAll('.js-confirm').forEach(function (el) {
-    el.addEventListener('click', function (e) {
-      const msg = el.dataset.confirm || 'Apakah Anda yakin ingin melanjutkan tindakan ini?';
-      if (!window.confirm(msg)) {
-        e.preventDefault();
-      }
-    });
+  // 4. Konfirmasi Aksi Hapus Umum (Event Delegation untuk mendukung elemen dinamis real-time)
+  document.addEventListener('click', function (e) {
+    const el = e.target.closest ? e.target.closest('.js-confirm') : null;
+    if (!el) return;
+    const msg = el.dataset.confirm || 'Apakah Anda yakin ingin melanjutkan tindakan ini?';
+    if (!window.confirm(msg)) {
+      e.preventDefault();
+    }
   });
+
+  // 5. Sinkronisasi Real-Time (Polling + BroadcastChannel antar tab browser)
+  window.evotingBroadcastUpdate = function (type) {
+    try {
+      if (window.BroadcastChannel) {
+        const ch = new BroadcastChannel('evoting_updates');
+        ch.postMessage({ type: type || 'data_changed', ts: Date.now() });
+        ch.close();
+      }
+      localStorage.setItem('evoting_last_update', String(Date.now()));
+    } catch (_) {}
+  };
+
+  window.evotingUpdateChartMetrics = function (container, items) {
+    if (!container || !Array.isArray(items)) return;
+    items.forEach(function (item) {
+      const card = container.querySelector('.chart-item[data-kandidat-id="' + item.id + '"]');
+      if (!card) return;
+      const votesEl = card.querySelector('.chart-votes');
+      const pctEl   = card.querySelector('.chart-percent');
+      const fillEl  = card.querySelector('.chart-fill');
+      if (votesEl) votesEl.textContent = item.votes_lbl || (item.suara_fmt + ' Suara');
+      if (pctEl) pctEl.textContent = item.persen_fmt;
+      if (fillEl) fillEl.style.width = item.persen_val + '%';
+    });
+  };
+
+  window.evotingStartLivePolling = function (options) {
+    if (!options || typeof options.onData !== 'function') return;
+    const intervalMs = options.intervalMs || 1500;
+    const statusEl   = document.getElementById(options.statusElId || 'live-status');
+    let timerId      = null;
+    let inFlight     = false;
+    let queuedRun    = false;
+    let stopped      = false;
+
+    function setLiveStatus(online) {
+      if (!statusEl) return;
+      statusEl.classList.toggle('is-offline', !online);
+      const txtEl = statusEl.querySelector('.live-label');
+      if (txtEl) {
+        txtEl.textContent = online ? 'Live Otomatis' : 'Menyambung...';
+      }
+    }
+
+    function scheduleNext() {
+      if (stopped || document.hidden) return;
+      clearTimeout(timerId);
+      timerId = setTimeout(pollNow, intervalMs);
+    }
+
+    function buildUrl() {
+      const base = typeof options.getUrl === 'function' ? options.getUrl() : options.url;
+      const sep  = base.indexOf('?') === -1 ? '?' : '&';
+      return base + sep + '_t=' + Date.now();
+    }
+
+    function pollNow() {
+      if (stopped || document.hidden) return;
+      if (inFlight) {
+        queuedRun = true;
+        return;
+      }
+      inFlight = true;
+      fetch(buildUrl(), {
+        cache: 'no-store',
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+      })
+        .then(function (res) {
+          if (res.status === 401) {
+            stopped = true;
+            window.location.href = 'login.php';
+            return null;
+          }
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const ct = res.headers.get('content-type') || '';
+          if (ct.indexOf('application/json') === -1) throw new Error('Invalid JSON');
+          return res.json();
+        })
+        .then(function (data) {
+          if (!data || stopped) return;
+          setLiveStatus(true);
+          options.onData(data);
+        })
+        .catch(function () {
+          if (!stopped) setLiveStatus(false);
+        })
+        .finally(function () {
+          inFlight = false;
+          if (stopped) return;
+          if (queuedRun && !document.hidden) {
+            queuedRun = false;
+            pollNow();
+          } else {
+            scheduleNext();
+          }
+        });
+    }
+
+    function triggerImmediate() {
+      if (stopped || document.hidden) return;
+      clearTimeout(timerId);
+      pollNow();
+    }
+
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) triggerImmediate();
+    });
+    window.addEventListener('focus', triggerImmediate);
+
+    try {
+      if (window.BroadcastChannel) {
+        const ch = new BroadcastChannel('evoting_updates');
+        ch.addEventListener('message', triggerImmediate);
+      }
+    } catch (_) {}
+
+    window.addEventListener('storage', function (e) {
+      if (e.key === 'evoting_last_update') triggerImmediate();
+    });
+
+    scheduleNext();
+  };
+
+  if (document.querySelector('[data-broadcast-update="1"]')) {
+    window.evotingBroadcastUpdate('admin_action');
+  }
 })();

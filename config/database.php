@@ -73,79 +73,109 @@ function verify_csrf(?string $token): bool {
 }
 
 /**
- * Proteksi halaman Administrator
+ * Proteksi halaman Administrator (mengembalikan HTTP 401 JSON untuk request AJAX)
  */
 function require_admin(): void {
     if (empty($_SESSION['admin_id'])) {
+        $isAjax = isset($_GET['ajax']) || strtolower($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'xmlhttprequest';
+        if ($isAjax) {
+            http_response_code(401);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => 'unauthorized', 'login_url' => 'login.php']);
+            exit;
+        }
         header('Location: login.php');
         exit;
     }
 }
 
 /**
- * Rate Limiting berbasis IP + Sesi untuk mencegah Brute-Force & Enumerasi (BUG-SEC-02)
- * Mengembalikan sisa detik tunggu (0 jika diizinkan)
+ * Membaca data rate limit yang masih aktif (belum melewati masa berlaku)
  */
-function check_rate_limit(string $bucket, int $maxAttempts = 5, int $windowSeconds = 60): int {
-    $now  = time();
+function get_rate_limit_data(string $bucket, int $maxAttempts, int $now): array {
     $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
     $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
 
-    $data = ['count' => 0, 'expires' => $now + $windowSeconds];
+    $default    = ['count' => 0, 'expires' => 0, 'window_expires' => 0];
+    $candidates = [];
+
     if (is_file($file)) {
         $raw = @file_get_contents($file);
         $dec = $raw ? @json_decode($raw, true) : null;
-        if (is_array($dec) && isset($dec['count'], $dec['expires']) && $dec['expires'] > $now) {
-            $data = $dec;
+        if (is_array($dec) && isset($dec['count'], $dec['expires'])) {
+            $candidates[] = $dec;
         }
     }
 
     $sessKey = 'rl_' . $bucket;
-    if (!empty($_SESSION[$sessKey]) && $_SESSION[$sessKey]['expires'] > $now) {
-        if ($_SESSION[$sessKey]['count'] > $data['count']) {
-            $data = $_SESSION[$sessKey];
+    if (!empty($_SESSION[$sessKey]) && is_array($_SESSION[$sessKey]) && isset($_SESSION[$sessKey]['count'], $_SESSION[$sessKey]['expires'])) {
+        $candidates[] = $_SESSION[$sessKey];
+    }
+
+    $best = $default;
+    foreach ($candidates as $item) {
+        $count   = (int)($item['count'] ?? 0);
+        $expires = (int)($item['expires'] ?? 0);
+        $winExp  = (int)($item['window_expires'] ?? $expires);
+
+        $isActive = ($count >= $maxAttempts) ? ($expires > $now) : ($winExp > $now);
+        if ($isActive && $count > $best['count']) {
+            $best = [
+                'count'          => $count,
+                'expires'        => $expires,
+                'window_expires' => $winExp,
+            ];
         }
     }
 
-    if ($data['count'] >= $maxAttempts) {
+    return $best;
+}
+
+/**
+ * Rate Limiting berbasis IP + Sesi untuk mencegah Brute-Force & Enumerasi (BUG-SEC-02)
+ * Mengembalikan sisa detik tunggu (0 jika diizinkan)
+ */
+function check_rate_limit(string $bucket, int $maxAttempts = 5, int $lockoutSeconds = 30): int {
+    $now  = time();
+    $data = get_rate_limit_data($bucket, $maxAttempts, $now);
+
+    if ($data['count'] >= $maxAttempts && $data['expires'] > $now) {
         return max(1, (int)($data['expires'] - $now));
     }
     return 0;
 }
 
 /**
- * Mencatat 1 percobaan gagal ke dalam ember Rate Limit
+ * Mencatat 1 percobaan gagal ke dalam ember Rate Limit.
+ * Mengembalikan sisa detik tunggu jika batas percobaan telah tercapai (0 jika belum terkunci).
  */
-function record_failed_attempt(string $bucket, int $windowSeconds = 60): void {
+function record_failed_attempt(string $bucket, int $lockoutSeconds = 5, int $maxAttempts = 5): int {
     $now  = time();
     $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
     $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
 
-    $data = ['count' => 0, 'expires' => $now + $windowSeconds];
-    if (is_file($file)) {
-        $raw = @file_get_contents($file);
-        $dec = $raw ? @json_decode($raw, true) : null;
-        if (is_array($dec) && isset($dec['count'], $dec['expires']) && $dec['expires'] > $now) {
-            $data = $dec;
-        }
-    }
-
+    $data = get_rate_limit_data($bucket, $maxAttempts, $now);
     $data['count']++;
-    if ($data['count'] === 1) {
-        $data['expires'] = $now + $windowSeconds;
-    }
+    $data['window_expires'] = $now + max(60, $lockoutSeconds);
+    $data['expires']        = $now + $lockoutSeconds;
 
     @file_put_contents($file, json_encode($data), LOCK_EX);
     $_SESSION['rl_' . $bucket] = $data;
+
+    if ($data['count'] >= $maxAttempts) {
+        return $lockoutSeconds;
+    }
+    return 0;
 }
 
 /**
- * Mereset catatan percobaan gagal setelah autentikasi berhasil
+ * Mereset catatan percobaan gagal setelah kode / autentikasi berhasil
  */
 function clear_rate_limit(string $bucket): void {
     $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
     $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
     if (is_file($file)) {
+        @file_put_contents($file, json_encode(['count' => 0, 'expires' => 0, 'window_expires' => 0]), LOCK_EX);
         @unlink($file);
     }
     unset($_SESSION['rl_' . $bucket]);
@@ -209,8 +239,8 @@ try {
 function get_pengaturan(PDO $pdo): array {
     $defaults = [
         'id'              => 1,
-        'nama_sekolah'    => 'SMA Negeri 1 Harapan',
-        'periode'         => '2026/2027',
+        'nama_sekolah'    => '',
+        'periode'         => '',
         'status_voting'   => 'buka',
         'tampilkan_hasil' => 0,
         'tema'            => 'light',
@@ -234,4 +264,96 @@ function get_pengaturan(PDO $pdo): array {
     }
 
     return $defaults;
+}
+
+/**
+ * Mengambil ringkasan statistik token (total, terpakai, sisa, persentase partisipasi)
+ */
+function get_token_stats(PDO $pdo): array {
+    $stmt = $pdo->query("
+        SELECT
+          COUNT(*) AS total_token,
+          COALESCE(SUM(CASE WHEN sudah_dipakai = 1 THEN 1 ELSE 0 END), 0) AS token_terpakai,
+          COALESCE(SUM(CASE WHEN sudah_dipakai = 0 THEN 1 ELSE 0 END), 0) AS token_sisa
+        FROM tokens
+    ");
+    $row      = $stmt->fetch() ?: [];
+    $total    = (int)($row['total_token'] ?? 0);
+    $terpakai = (int)($row['token_terpakai'] ?? 0);
+    $sisa     = (int)($row['token_sisa'] ?? 0);
+
+    return [
+        'total'       => $total,
+        'terpakai'    => $terpakai,
+        'sisa'        => $sisa,
+        'partisipasi' => $total > 0 ? round(($terpakai / $total) * 100, 1) : 0,
+    ];
+}
+
+/**
+ * Menentukan URL foto kandidat yang valid dengan fallback default-candidate.png
+ */
+function resolve_candidate_photo_url(?string $filename, string $prefix = '../'): string {
+    $foto      = !empty($filename) ? basename($filename) : 'default-candidate.png';
+    $uploadDir = dirname(__DIR__) . '/assets/uploads/';
+    if (!is_file($uploadDir . $foto)) {
+        $foto = 'default-candidate.png';
+    }
+    return $prefix . 'assets/uploads/' . $foto;
+}
+
+/**
+ * Merender daftar bar grafik perolehan suara kandidat (digunakan oleh Dashboard & Hasil)
+ */
+function render_candidate_chart_items(array $kandidatList, int $totalSuara, string $titlePrefix = 'No. '): string {
+    ob_start();
+    echo '<div class="chart-list">';
+    foreach ($kandidatList as $k) {
+        $suara   = (int)$k['jumlah_suara'];
+        $persen  = $totalSuara > 0 ? round(($suara / $totalSuara) * 100, 1) : 0;
+        $fotoUrl = resolve_candidate_photo_url($k['nama_file_foto'] ?? null, '../');
+        $noPad   = str_pad((string)$k['no_urut'], 2, '0', STR_PAD_LEFT);
+        $sub     = !empty($k['nama_wakil']) ? 'Wakil: ' . e($k['nama_wakil']) : 'Calon Ketua OSIS';
+        ?>
+        <div class="chart-item" data-kandidat-id="<?= (int)$k['id'] ?>">
+          <div class="chart-head">
+            <div class="chart-candidate">
+              <img src="<?= e($fotoUrl) ?>" alt="Foto Kandidat">
+              <div>
+                <div class="chart-title"><?= e($titlePrefix) ?><?= e($noPad) ?> &mdash; <?= e($k['nama_ketua']) ?></div>
+                <div class="chart-subtitle"><?= $sub ?></div>
+              </div>
+            </div>
+            <div class="chart-numbers">
+              <div class="chart-votes"><?= number_format($suara, 0, ',', '.') ?> Suara</div>
+              <div class="chart-percent"><?= e((string)$persen) ?>%</div>
+            </div>
+          </div>
+          <div class="chart-track">
+            <div class="chart-fill" style="width: <?= e((string)$persen) ?>%;"></div>
+          </div>
+        </div>
+        <?php
+    }
+    echo '</div>';
+    return (string)ob_get_clean();
+}
+
+/**
+ * Menyusun payload angka suara kandidat untuk respons JSON real-time
+ */
+function build_candidate_ajax_payload(array $kandidatList, int $totalSuara): array {
+    $items = [];
+    foreach ($kandidatList as $k) {
+        $suara   = (int)$k['jumlah_suara'];
+        $persen  = $totalSuara > 0 ? round(($suara / $totalSuara) * 100, 1) : 0;
+        $items[] = [
+            'id'         => (int)$k['id'],
+            'suara_fmt'  => number_format($suara, 0, ',', '.'),
+            'votes_lbl'  => number_format($suara, 0, ',', '.') . ' Suara',
+            'persen_fmt' => $persen . '%',
+            'persen_val' => $persen,
+        ];
+    }
+    return $items;
 }

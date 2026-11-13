@@ -170,7 +170,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save'
             $currentFile = basename($existing['nama_file_foto']);
             $currentExt  = strtolower(pathinfo($currentFile, PATHINFO_EXTENSION));
             $newTarget   = $baseSlug . '.' . $currentExt;
-            if ($newTarget !== 'default-candidate.png' && $newTarget !== $currentFile && is_file($uploadDir . $currentFile) && !file_exists($uploadDir . $newTarget)) {
+            if ($newTarget !== $currentFile && is_file($uploadDir . $currentFile)) {
+                if ($newTarget === 'default-candidate.png' || file_exists($uploadDir . $newTarget)) {
+                    $newTarget = $baseSlug . '-' . substr(bin2hex(random_bytes(2)), 0, 4) . '.' . $currentExt;
+                }
                 if (@rename($uploadDir . $currentFile, $uploadDir . $newTarget)) {
                     $finalFileName = $newTarget;
                 }
@@ -300,7 +303,7 @@ if ($editData) {
       </div>
 
       <?php if ($message !== ''): ?>
-        <div class="alert alert-success"><?= e($message) ?></div>
+        <div class="alert alert-success" data-broadcast-update="1"><?= e($message) ?></div>
       <?php endif; ?>
       <?php if ($error !== ''): ?>
         <div class="alert alert-error"><?= e($error) ?></div>

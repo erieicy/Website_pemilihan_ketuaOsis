@@ -14,9 +14,9 @@ if (!empty($_SESSION['admin_id'])) {
 $pengaturan = get_pengaturan($pdo);
 $error      = '';
 $username   = '';
+$waitSec    = check_rate_limit('admin_login', 5, 30);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $waitSec = check_rate_limit('admin_login', 5, 60);
     if ($waitSec > 0) {
         $error = "Terlalu banyak percobaan login gagal. Silakan tunggu {$waitSec} detik.";
     } elseif (!verify_csrf($_POST['csrf_token'] ?? '')) {
@@ -34,6 +34,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if ($admin && password_verify($password, $admin['password'])) {
                 clear_rate_limit('admin_login');
+                clear_rate_limit('admin_reauth');
+                clear_rate_limit('install_unlock');
                 session_regenerate_id(true);
                 $_SESSION['csrf_token']     = bin2hex(random_bytes(32));
                 $_SESSION['admin_id']       = (int)$admin['id'];
@@ -42,8 +44,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 header('Location: index.php');
                 exit;
             } else {
-                record_failed_attempt('admin_login', 60);
-                $error = 'Username atau password salah.';
+                $waitSec = record_failed_attempt('admin_login', 30, 5);
+                if ($waitSec > 0) {
+                    $error = "Terlalu banyak percobaan login gagal. Silakan tunggu {$waitSec} detik.";
+                } else {
+                    $error = 'Username atau password salah.';
+                }
             }
         }
     }
@@ -67,7 +73,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <p class="auth-subtitle">Panitia Pemilihan Ketua OSIS <?= e($pengaturan['periode']) ?></p>
       </div>
 
-      <?php if ($error !== ''): ?>
+      <?php if ($waitSec > 0): ?>
+        <div class="alert alert-error" id="rl-alert">
+          Terlalu banyak percobaan login gagal. Silakan tunggu <strong id="rl-countdown" class="mono" data-wait="<?= (int)$waitSec ?>"><?= (int)$waitSec ?></strong> detik.
+        </div>
+      <?php elseif ($error !== ''): ?>
         <div class="alert alert-error"><?= e($error) ?></div>
       <?php endif; ?>
 
@@ -82,7 +92,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             class="form-control mono"
             maxlength="50"
             value="<?= e($username) ?>"
-            autofocus
+            <?= $waitSec > 0 ? 'disabled' : 'autofocus' ?>
             required
           >
         </div>
@@ -93,10 +103,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             id="password"
             name="password"
             class="form-control"
+            <?= $waitSec > 0 ? 'disabled' : '' ?>
             required
           >
         </div>
-        <button type="submit" class="btn btn-primary btn-block">Masuk Panel Admin</button>
+        <button type="submit" id="btn-submit-login" class="btn btn-primary btn-block" <?= $waitSec > 0 ? 'disabled' : '' ?>>
+          <?= $waitSec > 0 ? 'Tunggu ' . (int)$waitSec . ' Detik...' : 'Masuk Panel Admin' ?>
+        </button>
       </form>
 
       <div class="auth-footer">
@@ -105,5 +118,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       </div>
     </div>
   </div>
+  <script>
+    (function () {
+      var rlCountdown = document.getElementById('rl-countdown');
+      var rlAlert     = document.getElementById('rl-alert');
+      var userInp     = document.getElementById('username');
+      var passInp     = document.getElementById('password');
+      var submitBtn   = document.getElementById('btn-submit-login');
+
+      if (!rlCountdown) return;
+      var rem = parseInt(rlCountdown.getAttribute('data-wait') || rlCountdown.textContent, 10) || 0;
+      if (rem <= 0) return;
+
+      var rlTimer = setInterval(function () {
+        rem -= 1;
+        if (rem <= 0) {
+          clearInterval(rlTimer);
+          if (rlAlert) rlAlert.style.display = 'none';
+          if (userInp) {
+            userInp.disabled = false;
+            userInp.focus();
+          }
+          if (passInp) passInp.disabled = false;
+          if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Masuk Panel Admin';
+          }
+        } else {
+          rlCountdown.textContent = String(rem);
+          if (submitBtn) {
+            submitBtn.textContent = 'Tunggu ' + rem + ' Detik...';
+          }
+        }
+      }, 1000);
+    })();
+  </script>
 </body>
 </html>

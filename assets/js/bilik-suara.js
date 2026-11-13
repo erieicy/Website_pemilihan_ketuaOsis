@@ -65,9 +65,18 @@
     });
   }
 
-  // Timer Auto-Redirect 3 Detik & Nada Singkat setelah memilih
+  // Timer Auto-Redirect 3 Detik, Notifikasi Real-Time Admin, & Nada Singkat setelah memilih
   const countdownEl = document.getElementById('redirect-countdown');
   if (countdownEl) {
+    try {
+      if (window.BroadcastChannel) {
+        const ch = new BroadcastChannel('evoting_updates');
+        ch.postMessage({ type: 'vote_recorded', ts: Date.now() });
+        ch.close();
+      }
+      localStorage.setItem('evoting_last_update', String(Date.now()));
+    } catch (_) {}
+
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (AudioCtx) {

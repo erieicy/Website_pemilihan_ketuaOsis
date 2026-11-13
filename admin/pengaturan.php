@@ -42,7 +42,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         // 2. Perbarui Profil / Password Admin (dengan Rate Limit & Penanganan Duplikasi Username)
         elseif ($action === 'save_account') {
-            $waitSec = check_rate_limit('admin_reauth', 5, 60);
+            $waitSec = check_rate_limit('admin_reauth', 5, 30);
             if ($waitSec > 0) {
                 $error = "Terlalu banyak percobaan password salah. Silakan tunggu {$waitSec} detik.";
             } else {
@@ -56,8 +56,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $adminRow = $stmtAdm->fetch();
 
                 if (!$adminRow || !password_verify($passLama, $adminRow['password'])) {
-                    record_failed_attempt('admin_reauth', 60);
-                    $error = 'Password saat ini salah. Perubahan akun dibatalkan.';
+                    $waitSec = record_failed_attempt('admin_reauth', 30, 5);
+                    $error   = $waitSec > 0
+                        ? "Terlalu banyak percobaan password salah. Silakan tunggu {$waitSec} detik."
+                        : 'Password saat ini salah. Perubahan akun dibatalkan.';
                 } elseif ($namaLengkap === '' || $usernameBaru === '') {
                     $error = 'Nama lengkap dan username tidak boleh kosong.';
                 } elseif (mb_strlen($namaLengkap) > 100 || mb_strlen($usernameBaru) > 50) {
@@ -75,6 +77,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $stmtUpd = $pdo->prepare('UPDATE admin SET nama_lengkap = ?, username = ? WHERE id = ?');
                             $stmtUpd->execute([$namaLengkap, $usernameBaru, (int)$adminRow['id']]);
                         }
+                        session_regenerate_id(true);
                         $_SESSION['admin_nama']     = $namaLengkap;
                         $_SESSION['admin_username'] = $usernameBaru;
                         $message = 'Informasi akun administrator berhasil diperbarui.';
@@ -88,7 +91,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         // 3. Reset Data Simulasi (FR-12)
         elseif ($action === 'reset_simulasi') {
-            $waitSec = check_rate_limit('admin_reauth', 5, 60);
+            $waitSec = check_rate_limit('admin_reauth', 5, 30);
             if ($waitSec > 0) {
                 $error = "Terlalu banyak percobaan password salah. Silakan tunggu {$waitSec} detik.";
             } else {
@@ -99,8 +102,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $adminRow = $stmtAdm->fetch();
 
                 if (!$adminRow || !password_verify($passConfirm, $adminRow['password'])) {
-                    record_failed_attempt('admin_reauth', 60);
-                    $error = 'Password konfirmasi salah! Reset data simulasi dibatalkan.';
+                    $waitSec = record_failed_attempt('admin_reauth', 30, 5);
+                    $error   = $waitSec > 0
+                        ? "Terlalu banyak percobaan password salah. Silakan tunggu {$waitSec} detik."
+                        : 'Password konfirmasi salah! Reset data simulasi dibatalkan.';
                 } else {
                     clear_rate_limit('admin_reauth');
                     try {
@@ -122,7 +127,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         // 4. Buka Kunci install.php & Reset Total Sistem dari Awal (Factory Reset)
         elseif ($action === 'unlock_installer') {
-            $waitSec = check_rate_limit('admin_reauth', 5, 60);
+            $waitSec = check_rate_limit('admin_reauth', 5, 30);
             if ($waitSec > 0) {
                 $error = "Terlalu banyak percobaan password salah. Silakan tunggu {$waitSec} detik.";
             } else {
@@ -133,8 +138,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $adminRow = $stmtAdm->fetch();
 
                 if (!$adminRow || !password_verify($passInstall, $adminRow['password'])) {
-                    record_failed_attempt('admin_reauth', 60);
-                    $error = 'Password konfirmasi salah! Reset total ke install.php dibatalkan.';
+                    $waitSec = record_failed_attempt('admin_reauth', 30, 5);
+                    $error   = $waitSec > 0
+                        ? "Terlalu banyak percobaan password salah. Silakan tunggu {$waitSec} detik."
+                        : 'Password konfirmasi salah! Reset total ke install.php dibatalkan.';
                 } else {
                     clear_rate_limit('admin_reauth');
                     try {
@@ -161,6 +168,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $pengaturan = get_pengaturan($pdo);
+$waitSec    = check_rate_limit('admin_reauth', 5, 30);
 ?>
 <!DOCTYPE html>
 <html lang="id" data-theme="<?= e($pengaturan['tema']) ?>">
@@ -205,9 +213,13 @@ $pengaturan = get_pengaturan($pdo);
       </div>
 
       <?php if ($message !== ''): ?>
-        <div class="alert alert-success"><?= e($message) ?></div>
+        <div class="alert alert-success" data-broadcast-update="1"><?= e($message) ?></div>
       <?php endif; ?>
-      <?php if ($error !== ''): ?>
+      <?php if ($waitSec > 0): ?>
+        <div class="alert alert-error" id="rl-alert">
+          Terlalu banyak percobaan password salah. Silakan tunggu <strong id="rl-countdown" class="mono" data-wait="<?= (int)$waitSec ?>"><?= (int)$waitSec ?></strong> detik.
+        </div>
+      <?php elseif ($error !== ''): ?>
         <div class="alert alert-error"><?= e($error) ?></div>
       <?php endif; ?>
 
@@ -283,7 +295,7 @@ $pengaturan = get_pengaturan($pdo);
           <!-- Panel Buka Kunci install.php & Reset Total Sistem dari Awal -->
           <div id="panel-installer" class="panel" style="border-color: var(--danger-border);">
             <div class="panel-header" style="background-color: var(--danger-bg); color: var(--danger);">
-              <span>Buka Kunci &amp; Instal Ulang Sistem dari Awal (<code>install.php</code>)</span>
+              <span>Buka Kunci &amp; Instal Ulang Sistem dari Awal </span>
             </div>
             <div class="panel-body">
               <p class="text-muted" style="font-size: 13px; margin-bottom: 14px;">
@@ -418,5 +430,24 @@ $pengaturan = get_pengaturan($pdo);
     </main>
   </div>
   <script src="../assets/js/admin.js"></script>
+  <script>
+    (function () {
+      var rlCountdown = document.getElementById('rl-countdown');
+      var rlAlert     = document.getElementById('rl-alert');
+      if (!rlCountdown) return;
+      var rem = parseInt(rlCountdown.getAttribute('data-wait') || rlCountdown.textContent, 10) || 0;
+      if (rem <= 0) return;
+
+      var rlTimer = setInterval(function () {
+        rem -= 1;
+        if (rem <= 0) {
+          clearInterval(rlTimer);
+          if (rlAlert) rlAlert.style.display = 'none';
+        } else {
+          rlCountdown.textContent = String(rem);
+        }
+      }, 1000);
+    })();
+  </script>
 </body>
 </html>

@@ -29,24 +29,148 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'toggl
 $pengaturan = get_pengaturan($pdo);
 $isUnlocked = ((int)$pengaturan['tampilkan_hasil'] === 1);
 
-$stmtStats = $pdo->query("
-    SELECT
-      COUNT(*) AS total_token,
-      COALESCE(SUM(CASE WHEN sudah_dipakai = 1 THEN 1 ELSE 0 END), 0) AS token_terpakai,
-      COALESCE(SUM(CASE WHEN sudah_dipakai = 0 THEN 1 ELSE 0 END), 0) AS token_sisa
-    FROM tokens
-");
-$stats = $stmtStats->fetch();
-$totalToken    = (int)($stats['total_token'] ?? 0);
-$tokenTerpakai = (int)($stats['token_terpakai'] ?? 0);
-$tokenSisa     = (int)($stats['token_sisa'] ?? 0);
+$tokenStats    = get_token_stats($pdo);
+$totalToken    = $tokenStats['total'];
+$tokenTerpakai = $tokenStats['terpakai'];
+$tokenSisa     = $tokenStats['sisa'];
 
 $stmtKandidat = $pdo->query('SELECT * FROM kandidat ORDER BY no_urut ASC, id ASC');
 $kandidatList = $stmtKandidat->fetchAll();
 
 $totalSuaraSah = 0;
+$sigParts      = [$isUnlocked ? '1' : '0'];
 foreach ($kandidatList as $k) {
     $totalSuaraSah += (int)$k['jumlah_suara'];
+    $sigParts[]     = $k['id'] . ':' . $k['no_urut'] . ':' . $k['nama_ketua'] . ':' . ($k['nama_wakil'] ?? '') . ':' . ($k['nama_file_foto'] ?? '');
+}
+$structSig  = md5(implode('|', $sigParts));
+$activeCsrf = csrf_token();
+
+/**
+ * Merender tombol kontrol lock/unlock & cetak di header Halaman Hasil
+ */
+function render_hasil_header_controls(bool $isUnlocked, string $csrfToken): string {
+    ob_start(); ?>
+    <form method="post" action="hasil.php" style="display: inline;">
+      <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+      <input type="hidden" name="action" value="toggle_lock">
+      <input type="hidden" name="tampilkan_hasil" value="<?= $isUnlocked ? '0' : '1' ?>">
+      <button type="submit" class="btn <?= $isUnlocked ? '' : 'btn-primary' ?>">
+        <?= $isUnlocked ? 'Kunci / Sembunyikan Hasil' : 'Buka Hasil Perhitungan Suara' ?>
+      </button>
+    </form>
+    <?php if ($isUnlocked): ?>
+      <button type="button" class="btn btn-primary" onclick="window.print()">Cetak Berita Acara / Hasil</button>
+    <?php endif;
+    return (string)ob_get_clean();
+}
+
+/**
+ * Merender isi panel grafik & tabel rekapitulasi suara sah
+ */
+function render_hasil_results_section(bool $isUnlocked, array $kandidatList, int $totalSuaraSah, string $csrfToken): string {
+    ob_start();
+    if (!$isUnlocked): ?>
+      <!-- Tampilan Terkunci (FR-11) -->
+      <div class="panel">
+        <div class="panel-body">
+          <div class="locked-panel">
+            <h3>Grafik Perolehan Suara Sedang Dikunci</h3>
+            <p>
+              Fitur <strong>Lock Quick Count</strong> aktif untuk mencegah kebocoran tren suara selama proses pemilihan berlangsung. Klik tombol di bawah apabila pemungutan suara telah selesai dan perhitungan resmi dimulai.
+            </p>
+            <form method="post" action="hasil.php">
+              <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+              <input type="hidden" name="action" value="toggle_lock">
+              <input type="hidden" name="tampilkan_hasil" value="1">
+              <button type="submit" class="btn btn-primary">Buka Grafik Perhitungan Sekarang</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    <?php else: ?>
+      <!-- Grafik Perolehan Suara -->
+      <div class="panel">
+        <div class="panel-header">
+          <span>Grafik Perolehan Suara Kandidat</span>
+          <span id="hasil-updated-at" class="mono" style="font-size: 12px; font-weight: 400;">Dicetak/Diakses: <?= date('d/m/Y H:i:s') ?> WIB</span>
+        </div>
+        <div class="panel-body" id="hasil-chart-body">
+          <?php if (empty($kandidatList)): ?>
+            <p class="text-muted">Belum ada kandidat terdaftar.</p>
+          <?php else: ?>
+            <?= render_candidate_chart_items($kandidatList, $totalSuaraSah, 'No. Urut ') ?>
+          <?php endif; ?>
+        </div>
+      </div>
+
+      <!-- Tabel Rekapitulasi Suara -->
+      <div class="panel">
+        <div class="panel-header">
+          <span>Tabel Rekapitulasi Suara Sah</span>
+        </div>
+        <div class="panel-body" style="padding: 0;">
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th style="width: 90px;">No. Urut</th>
+                  <th>Nama Calon Ketua</th>
+                  <th>Nama Calon Wakil</th>
+                  <th style="text-align: right;">Jumlah Suara</th>
+                  <th style="text-align: right;">Persentase</th>
+                </tr>
+              </thead>
+              <tbody id="rekap-table-body">
+                <?php if (empty($kandidatList)): ?>
+                  <tr>
+                    <td colspan="5" class="text-muted" style="text-align: center; padding: 20px;">Belum ada kandidat terdaftar.</td>
+                  </tr>
+                <?php else: ?>
+                  <?php foreach ($kandidatList as $k): ?>
+                    <?php
+                      $suara  = (int)$k['jumlah_suara'];
+                      $persen = $totalSuaraSah > 0 ? round(($suara / $totalSuaraSah) * 100, 1) : 0;
+                    ?>
+                    <tr data-kandidat-id="<?= (int)$k['id'] ?>">
+                      <td class="mono" style="font-weight: 700;"><?= str_pad((string)$k['no_urut'], 2, '0', STR_PAD_LEFT) ?></td>
+                      <td style="font-weight: 600;"><?= e($k['nama_ketua']) ?></td>
+                      <td><?= !empty($k['nama_wakil']) ? e($k['nama_wakil']) : '<span class="text-muted">&mdash;</span>' ?></td>
+                      <td class="mono rekap-suara" style="text-align: right; font-weight: 700;"><?= number_format($suara, 0, ',', '.') ?></td>
+                      <td class="mono rekap-persen" style="text-align: right;"><?= e((string)$persen) ?>%</td>
+                    </tr>
+                  <?php endforeach; ?>
+                <?php endif; ?>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    <?php endif;
+    return (string)ob_get_clean();
+}
+
+// Endpoint AJAX Real-Time untuk pembaruan otomatis tanpa refresh
+if (isset($_GET['ajax'])) {
+    session_write_close();
+    $clientSig = (string)($_GET['sig'] ?? '');
+    $structChanged = ($clientSig !== $structSig);
+
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    echo json_encode([
+        'total_suara_sah_fmt' => number_format($totalSuaraSah, 0, ',', '.'),
+        'token_terpakai_fmt'  => number_format($tokenTerpakai, 0, ',', '.'),
+        'token_meta_fmt'      => 'Dari total ' . number_format($totalToken, 0, ',', '.') . ' token',
+        'token_sisa_fmt'      => number_format($tokenSisa, 0, ',', '.'),
+        'updated_at_fmt'      => 'Dicetak/Diakses: ' . date('d/m/Y H:i:s') . ' WIB',
+        'tema'                => $pengaturan['tema'],
+        'struct_sig'          => $structSig,
+        'header_html'         => $structChanged ? render_hasil_header_controls($isUnlocked, $activeCsrf) : null,
+        'section_html'        => $structChanged ? render_hasil_results_section($isUnlocked, $kandidatList, $totalSuaraSah, $activeCsrf) : null,
+        'kandidat'            => build_candidate_ajax_payload($kandidatList, $totalSuaraSah),
+    ]);
+    exit;
 }
 ?>
 <!DOCTYPE html>
@@ -92,24 +216,15 @@ foreach ($kandidatList as $k) {
         </div>
 
         <div class="filter-bar no-print">
-          <!-- Tombol Toggle Kunci Hasil (FR-11) -->
-          <form method="post" action="hasil.php" style="display: inline;">
-            <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
-            <input type="hidden" name="action" value="toggle_lock">
-            <input type="hidden" name="tampilkan_hasil" value="<?= $isUnlocked ? '0' : '1' ?>">
-            <button type="submit" class="btn <?= $isUnlocked ? '' : 'btn-primary' ?>">
-              <?= $isUnlocked ? 'Kunci / Sembunyikan Hasil' : 'Buka Hasil Perhitungan Suara' ?>
-            </button>
-          </form>
-
-          <?php if ($isUnlocked): ?>
-            <button type="button" class="btn btn-primary" onclick="window.print()">Cetak Berita Acara / Hasil</button>
-          <?php endif; ?>
+          <!-- Tombol Toggle Kunci Hasil & Cetak (FR-11) -->
+          <div id="hasil-header-controls" class="filter-bar">
+            <?= render_hasil_header_controls($isUnlocked, $activeCsrf) ?>
+          </div>
         </div>
       </div>
 
       <?php if ($message !== ''): ?>
-        <div class="alert alert-success no-print"><?= e($message) ?></div>
+        <div class="alert alert-success no-print" data-broadcast-update="1"><?= e($message) ?></div>
       <?php endif; ?>
       <?php if ($error !== ''): ?>
         <div class="alert alert-error no-print"><?= e($error) ?></div>
@@ -118,128 +233,83 @@ foreach ($kandidatList as $k) {
       <div class="stats-grid">
         <div class="stat-card">
           <div class="stat-label">Total Suara Sah Masuk</div>
-          <div class="stat-value"><?= number_format($totalSuaraSah, 0, ',', '.') ?></div>
+          <div class="stat-value" id="hasil-total-suara"><?= number_format($totalSuaraSah, 0, ',', '.') ?></div>
           <div class="stat-meta">Akumulasi seluruh kandidat</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">Token Terpakai</div>
-          <div class="stat-value"><?= number_format($tokenTerpakai, 0, ',', '.') ?></div>
-          <div class="stat-meta">Dari total <?= number_format($totalToken, 0, ',', '.') ?> token</div>
+          <div class="stat-value" id="hasil-token-terpakai"><?= number_format($tokenTerpakai, 0, ',', '.') ?></div>
+          <div class="stat-meta" id="hasil-token-meta">Dari total <?= number_format($totalToken, 0, ',', '.') ?> token</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">Token Belum Dipakai</div>
-          <div class="stat-value"><?= number_format($tokenSisa, 0, ',', '.') ?></div>
+          <div class="stat-value" id="hasil-token-sisa"><?= number_format($tokenSisa, 0, ',', '.') ?></div>
           <div class="stat-meta">Sisa kertas token</div>
         </div>
       </div>
 
-      <?php if (!$isUnlocked): ?>
-        <!-- Tampilan Terkunci (FR-11) -->
-        <div class="panel">
-          <div class="panel-body">
-            <div class="locked-panel">
-              <h3>Grafik Perolehan Suara Sedang Dikunci</h3>
-              <p>
-                Fitur <strong>Lock Quick Count</strong> aktif untuk mencegah kebocoran tren suara selama proses pemilihan berlangsung. Klik tombol di bawah apabila pemungutan suara telah selesai dan perhitungan resmi dimulai.
-              </p>
-              <form method="post" action="hasil.php">
-                <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
-                <input type="hidden" name="action" value="toggle_lock">
-                <input type="hidden" name="tampilkan_hasil" value="1">
-                <button type="submit" class="btn btn-primary">Buka Grafik Perhitungan Sekarang</button>
-              </form>
-            </div>
-          </div>
-        </div>
-      <?php else: ?>
-        <!-- Grafik Perolehan Suara -->
-        <div class="panel">
-          <div class="panel-header">
-            <span>Grafik Perolehan Suara Kandidat</span>
-            <span class="mono" style="font-size: 12px; font-weight: 400;">Dicetak/Diakses: <?= date('d/m/Y H:i') ?> WIB</span>
-          </div>
-          <div class="panel-body">
-            <?php if (empty($kandidatList)): ?>
-              <p class="text-muted">Belum ada kandidat terdaftar.</p>
-            <?php else: ?>
-              <div class="chart-list">
-                <?php foreach ($kandidatList as $k): ?>
-                  <?php
-                    $suara   = (int)$k['jumlah_suara'];
-                    $persen = $totalSuaraSah > 0 ? round(($suara / $totalSuaraSah) * 100, 1) : 0;
-                    $foto    = !empty($k['nama_file_foto']) ? basename($k['nama_file_foto']) : 'default-candidate.png';
-                    $fotoUrl = '../assets/uploads/' . $foto;
-                    if (!file_exists(dirname(__DIR__) . '/assets/uploads/' . $foto)) {
-                        $fotoUrl = '../assets/uploads/default-candidate.png';
-                    }
-                  ?>
-                  <div class="chart-item">
-                    <div class="chart-head">
-                      <div class="chart-candidate">
-                        <img src="<?= e($fotoUrl) ?>" alt="Foto Kandidat">
-                        <div>
-                          <div class="chart-title">
-                            No. Urut <?= str_pad((string)$k['no_urut'], 2, '0', STR_PAD_LEFT) ?> &mdash; <?= e($k['nama_ketua']) ?>
-                          </div>
-                          <div class="chart-subtitle">
-                            <?= !empty($k['nama_wakil']) ? 'Wakil: ' . e($k['nama_wakil']) : 'Calon Ketua OSIS' ?>
-                          </div>
-                        </div>
-                      </div>
-                      <div class="chart-numbers">
-                        <div class="chart-votes"><?= number_format($suara, 0, ',', '.') ?> Suara</div>
-                        <div class="chart-percent"><?= e((string)$persen) ?>%</div>
-                      </div>
-                    </div>
-                    <div class="chart-track">
-                      <div class="chart-fill" style="width: <?= e((string)$persen) ?>%;"></div>
-                    </div>
-                  </div>
-                <?php endforeach; ?>
-              </div>
-            <?php endif; ?>
-          </div>
-        </div>
-
-        <!-- Tabel Rekapitulasi Suara -->
-        <div class="panel">
-          <div class="panel-header">
-            <span>Tabel Rekapitulasi Suara Sah</span>
-          </div>
-          <div class="panel-body" style="padding: 0;">
-            <div class="table-wrap">
-              <table class="table">
-                <thead>
-                  <tr>
-                    <th style="width: 90px;">No. Urut</th>
-                    <th>Nama Calon Ketua</th>
-                    <th>Nama Calon Wakil</th>
-                    <th style="text-align: right;">Jumlah Suara</th>
-                    <th style="text-align: right;">Persentase</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <?php foreach ($kandidatList as $k): ?>
-                    <?php
-                      $suara  = (int)$k['jumlah_suara'];
-                      $persen = $totalSuaraSah > 0 ? round(($suara / $totalSuaraSah) * 100, 1) : 0;
-                    ?>
-                    <tr>
-                      <td class="mono" style="font-weight: 700;"><?= str_pad((string)$k['no_urut'], 2, '0', STR_PAD_LEFT) ?></td>
-                      <td style="font-weight: 600;"><?= e($k['nama_ketua']) ?></td>
-                      <td><?= !empty($k['nama_wakil']) ? e($k['nama_wakil']) : '<span class="text-muted">&mdash;</span>' ?></td>
-                      <td class="mono" style="text-align: right; font-weight: 700;"><?= number_format($suara, 0, ',', '.') ?></td>
-                      <td class="mono" style="text-align: right;"><?= e((string)$persen) ?>%</td>
-                    </tr>
-                  <?php endforeach; ?>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      <?php endif; ?>
+      <div id="hasil-results-section" data-struct-sig="<?= e($structSig) ?>">
+        <?= render_hasil_results_section($isUnlocked, $kandidatList, $totalSuaraSah, $activeCsrf) ?>
+      </div>
     </main>
   </div>
   <script src="../assets/js/admin.js"></script>
+  <script>
+    (function () {
+      var elTotalSuara   = document.getElementById('hasil-total-suara');
+      var elTokenDipakai = document.getElementById('hasil-token-terpakai');
+      var elTokenMeta    = document.getElementById('hasil-token-meta');
+      var elTokenSisa    = document.getElementById('hasil-token-sisa');
+      var headerControls = document.getElementById('hasil-header-controls');
+      var resultsSection = document.getElementById('hasil-results-section');
+
+      if (typeof window.evotingStartLivePolling === 'function' && resultsSection) {
+        window.evotingStartLivePolling({
+          getUrl: function () {
+            return 'hasil.php?ajax=1&sig=' + encodeURIComponent(resultsSection.dataset.structSig || '');
+          },
+          intervalMs: 1500,
+          onData: function (data) {
+            if (elTotalSuara) elTotalSuara.textContent = data.total_suara_sah_fmt;
+            if (elTokenDipakai) elTokenDipakai.textContent = data.token_terpakai_fmt;
+            if (elTokenMeta) elTokenMeta.textContent = data.token_meta_fmt;
+            if (elTokenSisa) elTokenSisa.textContent = data.token_sisa_fmt;
+
+            if (data.tema) {
+              document.documentElement.setAttribute('data-theme', data.tema);
+            }
+
+            if (data.section_html !== null && data.struct_sig !== resultsSection.dataset.structSig) {
+              resultsSection.innerHTML = data.section_html;
+              resultsSection.dataset.structSig = data.struct_sig;
+              if (headerControls && data.header_html !== null) {
+                headerControls.innerHTML = data.header_html;
+              }
+            } else {
+              var updatedAt = document.getElementById('hasil-updated-at');
+              if (updatedAt && data.updated_at_fmt) {
+                updatedAt.textContent = data.updated_at_fmt;
+              }
+              var chartBody = document.getElementById('hasil-chart-body');
+              if (chartBody) {
+                window.evotingUpdateChartMetrics(chartBody, data.kandidat);
+              }
+              var rekapBody = document.getElementById('rekap-table-body');
+              if (rekapBody && Array.isArray(data.kandidat)) {
+                data.kandidat.forEach(function (item) {
+                  var row = rekapBody.querySelector('tr[data-kandidat-id="' + item.id + '"]');
+                  if (!row) return;
+                  var tdSuara = row.querySelector('.rekap-suara');
+                  var tdPct   = row.querySelector('.rekap-persen');
+                  if (tdSuara) tdSuara.textContent = item.suara_fmt;
+                  if (tdPct) tdPct.textContent = item.persen_fmt;
+                });
+              }
+            }
+          }
+        });
+      }
+    })();
+  </script>
 </body>
 </html>

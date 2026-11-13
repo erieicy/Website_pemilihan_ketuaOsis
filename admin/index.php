@@ -10,27 +10,66 @@ require_admin();
 $pengaturan = get_pengaturan($pdo);
 
 // Statistik Token
-$stmtStats = $pdo->query("
-    SELECT
-      COUNT(*) AS total_token,
-      COALESCE(SUM(CASE WHEN sudah_dipakai = 1 THEN 1 ELSE 0 END), 0) AS token_terpakai,
-      COALESCE(SUM(CASE WHEN sudah_dipakai = 0 THEN 1 ELSE 0 END), 0) AS token_sisa
-    FROM tokens
-");
-$stats = $stmtStats->fetch();
-
-$totalToken    = (int)($stats['total_token'] ?? 0);
-$tokenTerpakai = (int)($stats['token_terpakai'] ?? 0);
-$tokenSisa     = (int)($stats['token_sisa'] ?? 0);
-$partisipasi   = $totalToken > 0 ? round(($tokenTerpakai / $totalToken) * 100, 1) : 0;
+$tokenStats    = get_token_stats($pdo);
+$totalToken    = $tokenStats['total'];
+$tokenTerpakai = $tokenStats['terpakai'];
+$tokenSisa     = $tokenStats['sisa'];
+$partisipasi   = $tokenStats['partisipasi'];
 
 // Daftar Kandidat & Total Suara
 $stmtKandidat = $pdo->query('SELECT * FROM kandidat ORDER BY no_urut ASC, id ASC');
 $kandidatList = $stmtKandidat->fetchAll();
 
 $totalSuaraKandidat = 0;
+$sigParts           = [(int)$pengaturan['tampilkan_hasil']];
+
 foreach ($kandidatList as $k) {
     $totalSuaraKandidat += (int)$k['jumlah_suara'];
+    $sigParts[] = $k['id'] . ':' . $k['no_urut'] . ':' . $k['nama_ketua'] . ':' . ($k['nama_wakil'] ?? '') . ':' . ($k['nama_file_foto'] ?? '');
+}
+$chartSig = md5(implode('|', $sigParts));
+
+/**
+ * Merender isi panel grafik perolehan suara pada Dashboard
+ */
+function render_dashboard_chart(array $pengaturan, array $kandidatList, int $totalSuaraKandidat): string {
+    ob_start();
+    if ((int)$pengaturan['tampilkan_hasil'] === 0): ?>
+      <div class="locked-panel">
+        <h3>Mode Kunci Hasil (Lock Quick Count) Aktif</h3>
+        <p>
+          Grafik perolehan suara disembunyikan selama pemungutan suara berlangsung untuk menjaga netralitas di ruang panitia.
+        </p>
+        <a href="hasil.php" class="btn btn-primary btn-sm">Buka Halaman Hasil Suara</a>
+      </div>
+    <?php elseif (empty($kandidatList)): ?>
+      <p class="text-muted">Belum ada kandidat yang ditambahkan. <a href="kandidat.php">Tambah kandidat sekarang</a>.</p>
+    <?php else: ?>
+      <?= render_candidate_chart_items($kandidatList, $totalSuaraKandidat, 'No. ') ?>
+    <?php endif;
+    return (string)ob_get_clean();
+}
+
+// Endpoint AJAX Real-Time untuk pembaruan otomatis tanpa refresh
+if (isset($_GET['ajax'])) {
+    session_write_close();
+    $clientSig = (string)($_GET['sig'] ?? '');
+
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    echo json_encode([
+        'total_token_fmt'     => number_format($totalToken, 0, ',', '.'),
+        'token_terpakai_fmt'  => number_format($tokenTerpakai, 0, ',', '.'),
+        'partisipasi_fmt'     => 'Partisipasi: ' . $partisipasi . '%',
+        'token_sisa_fmt'      => number_format($tokenSisa, 0, ',', '.'),
+        'status_voting'       => $pengaturan['status_voting'],
+        'tema'                => $pengaturan['tema'],
+        'jumlah_kandidat_fmt' => 'Jumlah Kandidat: ' . count($kandidatList) . ' Paslon',
+        'chart_sig'           => $chartSig,
+        'chart_html'          => ($clientSig !== $chartSig) ? render_dashboard_chart($pengaturan, $kandidatList, $totalSuaraKandidat) : null,
+        'kandidat'            => build_candidate_ajax_payload($kandidatList, $totalSuaraKandidat),
+    ]);
+    exit;
 }
 
 /**
@@ -146,6 +185,7 @@ $adminLanUrl = $scheme . '://' . $primaryIp . $portPart . $basePath . '/admin/';
           <p>Periode <?= e($pengaturan['periode']) ?> &mdash; Pantauan suara dan distribusi token jaringan lokal</p>
         </div>
         <div class="filter-bar">
+          </span>
           <a href="index.php" class="btn btn-sm">Muat Ulang Data</a>
           <a href="token.php" class="btn btn-sm btn-primary">+ Buat Token</a>
         </div>
@@ -155,29 +195,29 @@ $adminLanUrl = $scheme . '://' . $primaryIp . $portPart . $basePath . '/admin/';
       <div class="stats-grid">
         <div class="stat-card">
           <div class="stat-label">Total Token Dibuat</div>
-          <div class="stat-value"><?= number_format($totalToken, 0, ',', '.') ?></div>
+          <div class="stat-value" id="stat-total-token"><?= number_format($totalToken, 0, ',', '.') ?></div>
           <div class="stat-meta">Kertas token terdaftar</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">Suara Masuk (Terpakai)</div>
-          <div class="stat-value"><?= number_format($tokenTerpakai, 0, ',', '.') ?></div>
-          <div class="stat-meta">Partisipasi: <?= e((string)$partisipasi) ?>%</div>
+          <div class="stat-value" id="stat-token-terpakai"><?= number_format($tokenTerpakai, 0, ',', '.') ?></div>
+          <div class="stat-meta" id="stat-partisipasi">Partisipasi: <?= e((string)$partisipasi) ?>%</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">Sisa Token Belum Dipakai</div>
-          <div class="stat-value"><?= number_format($tokenSisa, 0, ',', '.') ?></div>
+          <div class="stat-value" id="stat-token-sisa"><?= number_format($tokenSisa, 0, ',', '.') ?></div>
           <div class="stat-meta">Masih sah untuk memilih</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">Status Bilik Suara</div>
-          <div class="stat-value" style="font-size: 22px;">
+          <div class="stat-value" id="stat-status-voting" style="font-size: 22px;">
             <?php if ($pengaturan['status_voting'] === 'buka'): ?>
               <span class="badge badge-success" style="font-size: 14px; padding: 4px 10px;">DIBUKA</span>
             <?php else: ?>
               <span class="badge badge-danger" style="font-size: 14px; padding: 4px 10px;">DITUTUP</span>
             <?php endif; ?>
           </div>
-          <div class="stat-meta">Jumlah Kandidat: <?= count($kandidatList) ?> Paslon</div>
+          <div class="stat-meta" id="stat-jumlah-kandidat">Jumlah Kandidat: <?= count($kandidatList) ?> Paslon</div>
         </div>
       </div>
 
@@ -187,50 +227,8 @@ $adminLanUrl = $scheme . '://' . $primaryIp . $portPart . $basePath . '/admin/';
           <span>Grafik Perolehan Suara Sementara</span>
           <a href="hasil.php" class="btn btn-sm">Kelola di Halaman Hasil &rarr;</a>
         </div>
-        <div class="panel-body">
-          <?php if ((int)$pengaturan['tampilkan_hasil'] === 0): ?>
-            <div class="locked-panel">
-              <h3>Mode Kunci Hasil (Lock Quick Count) Aktif</h3>
-              <p>
-                Grafik perolehan suara disembunyikan selama pemungutan suara berlangsung untuk menjaga netralitas di ruang panitia.
-              </p>
-              <a href="hasil.php" class="btn btn-primary btn-sm">Buka Halaman Hasil Suara</a>
-            </div>
-          <?php elseif (empty($kandidatList)): ?>
-            <p class="text-muted">Belum ada kandidat yang ditambahkan. <a href="kandidat.php">Tambah kandidat sekarang</a>.</p>
-          <?php else: ?>
-            <div class="chart-list">
-              <?php foreach ($kandidatList as $k): ?>
-                <?php
-                  $suara   = (int)$k['jumlah_suara'];
-                  $persen  = $totalSuaraKandidat > 0 ? round(($suara / $totalSuaraKandidat) * 100, 1) : 0;
-                  $foto    = !empty($k['nama_file_foto']) ? basename($k['nama_file_foto']) : 'default-candidate.png';
-                  $fotoUrl = '../assets/uploads/' . $foto;
-                  if (!file_exists(dirname(__DIR__) . '/assets/uploads/' . $foto)) {
-                      $fotoUrl = '../assets/uploads/default-candidate.png';
-                  }
-                ?>
-                <div class="chart-item">
-                  <div class="chart-head">
-                    <div class="chart-candidate">
-                      <img src="<?= e($fotoUrl) ?>" alt="Kandidat">
-                      <div>
-                        <div class="chart-title">No. <?= str_pad((string)$k['no_urut'], 2, '0', STR_PAD_LEFT) ?> &mdash; <?= e($k['nama_ketua']) ?></div>
-                        <div class="chart-subtitle"><?= !empty($k['nama_wakil']) ? 'Wakil: ' . e($k['nama_wakil']) : 'Calon Ketua OSIS' ?></div>
-                      </div>
-                    </div>
-                    <div class="chart-numbers">
-                      <div class="chart-votes"><?= number_format($suara, 0, ',', '.') ?> Suara</div>
-                      <div class="chart-percent"><?= e((string)$persen) ?>%</div>
-                    </div>
-                  </div>
-                  <div class="chart-track">
-                    <div class="chart-fill" style="width: <?= e((string)$persen) ?>%;"></div>
-                  </div>
-                </div>
-              <?php endforeach; ?>
-            </div>
-          <?php endif; ?>
+        <div class="panel-body" id="dashboard-chart-body" data-chart-sig="<?= e($chartSig) ?>">
+          <?= render_dashboard_chart($pengaturan, $kandidatList, $totalSuaraKandidat) ?>
         </div>
       </div>
 
@@ -322,7 +320,7 @@ $adminLanUrl = $scheme . '://' . $primaryIp . $portPart . $basePath . '/admin/';
                 <tr>
                   <th>Tema Antarmuka Aktif</th>
                   <td>
-                    <span class="badge"><?= $pengaturan['tema'] === 'dark' ? 'Dark (Gelap)' : 'White (Terang)' ?></span>
+                    <span class="badge" id="info-tema-badge"><?= $pengaturan['tema'] === 'dark' ? 'Dark (Gelap)' : 'White (Terang)' ?></span>
                     <span class="text-muted" style="font-size: 12px; margin-left: 8px;">Dapat diubah di menu <a href="pengaturan.php">Pengaturan</a></span>
                   </td>
                 </tr>
@@ -363,6 +361,60 @@ $adminLanUrl = $scheme . '://' . $primaryIp . $portPart . $basePath . '/admin/';
           }
         });
       });
+
+      var elTotalToken   = document.getElementById('stat-total-token');
+      var elTokenDipakai = document.getElementById('stat-token-terpakai');
+      var elPartisipasi  = document.getElementById('stat-partisipasi');
+      var elTokenSisa    = document.getElementById('stat-token-sisa');
+      var elStatusVoting = document.getElementById('stat-status-voting');
+      var elJmlKandidat  = document.getElementById('stat-jumlah-kandidat');
+      var elTemaBadge    = document.getElementById('info-tema-badge');
+      var chartBody      = document.getElementById('dashboard-chart-body');
+      var lastStatus     = <?= json_encode($pengaturan['status_voting']) ?>;
+
+      if (typeof window.evotingStartLivePolling === 'function') {
+        window.evotingStartLivePolling({
+          getUrl: function () {
+            var sig = chartBody ? (chartBody.dataset.chartSig || '') : '';
+            return 'index.php?ajax=1&sig=' + encodeURIComponent(sig);
+          },
+          intervalMs: 1500,
+          onData: function (data) {
+            if (elTotalToken) elTotalToken.textContent = data.total_token_fmt;
+            if (elTokenDipakai) elTokenDipakai.textContent = data.token_terpakai_fmt;
+            if (elPartisipasi) elPartisipasi.textContent = data.partisipasi_fmt;
+            if (elTokenSisa) elTokenSisa.textContent = data.token_sisa_fmt;
+            if (elJmlKandidat) elJmlKandidat.textContent = data.jumlah_kandidat_fmt;
+
+            if (elStatusVoting && data.status_voting !== lastStatus) {
+              lastStatus = data.status_voting;
+              var badge = document.createElement('span');
+              badge.className = 'badge ' + (data.status_voting === 'buka' ? 'badge-success' : 'badge-danger');
+              badge.style.fontSize = '14px';
+              badge.style.padding = '4px 10px';
+              badge.textContent = data.status_voting === 'buka' ? 'DIBUKA' : 'DITUTUP';
+              elStatusVoting.innerHTML = '';
+              elStatusVoting.appendChild(badge);
+            }
+
+            if (data.tema) {
+              document.documentElement.setAttribute('data-theme', data.tema);
+              if (elTemaBadge) {
+                elTemaBadge.textContent = data.tema === 'dark' ? 'Dark (Gelap)' : 'White (Terang)';
+              }
+            }
+
+            if (chartBody) {
+              if (data.chart_html !== null && data.chart_sig !== chartBody.dataset.chartSig) {
+                chartBody.innerHTML = data.chart_html;
+                chartBody.dataset.chartSig = data.chart_sig;
+              } else {
+                window.evotingUpdateChartMetrics(chartBody, data.kandidat);
+              }
+            }
+          }
+        });
+      }
     })();
   </script>
 </body>
