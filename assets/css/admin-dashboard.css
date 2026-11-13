@@ -137,6 +137,7 @@
 }
 
 @media print {
-  .admin-sidebar, .no-print { display: none !important; }
-  .admin-main { padding: 0; max-width: 100%; }
+  .admin-sidebar, .no-print, .sidebar-open-btn { display: none !important; }
+  .admin-main, body.sidebar-closed .admin-main { margin-left: 0 !important; padding: 0 !important; max-width: 100% !important; width: 100% !important; }
+  .page-header { position: static !important; margin-top: 0 !important; padding-top: 0 !important; }
 }

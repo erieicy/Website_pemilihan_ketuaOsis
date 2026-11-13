@@ -32,6 +32,10 @@ if (!$tokenRow || (int)$tokenRow['sudah_dipakai'] === 1) {
     exit;
 }
 
+// Ambil dan bersihkan pesan error dari proses_vote.php (BUG-FUN-02)
+$voterError = $_SESSION['voter_error'] ?? '';
+unset($_SESSION['voter_error']);
+
 $stmtKandidat = $pdo->query('SELECT * FROM kandidat ORDER BY no_urut ASC, id ASC');
 $kandidatList = $stmtKandidat->fetchAll();
 ?>
@@ -51,7 +55,11 @@ $kandidatList = $stmtKandidat->fetchAll();
     </div>
     <div class="booth-meta">
       <span>Token Aktif: <strong class="mono"><?= e($kodeToken) ?></strong></span>
-      <a href="index.php?keluar=1" class="btn btn-sm">Batal / Keluar</a>
+      <form method="post" action="index.php" style="display: inline;">
+        <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+        <input type="hidden" name="action" value="keluar">
+        <button type="submit" class="btn btn-sm">Batal / Keluar</button>
+      </form>
     </div>
   </header>
 
@@ -60,6 +68,12 @@ $kandidatList = $stmtKandidat->fetchAll();
       <h1>Surat Suara Pemilihan Ketua OSIS</h1>
       <p>Silakan pelajari Visi &amp; Misi kandidat, lalu klik tombol <strong>Pilih</strong> pada kandidat pilihan Anda.</p>
     </div>
+
+    <?php if ($voterError !== ''): ?>
+      <div class="alert alert-error" style="max-width: 560px; margin: 0 auto 24px; text-align: center;">
+        <?= e($voterError) ?>
+      </div>
+    <?php endif; ?>
 
     <?php if (empty($kandidatList)): ?>
       <div class="alert alert-warning" style="max-width: 520px; margin: 0 auto; text-align: center;">
@@ -148,7 +162,6 @@ $kandidatList = $stmtKandidat->fetchAll();
     <div class="modal-box" style="max-width: 430px;">
       <div class="modal-header">
         <span>Konfirmasi Pilihan Suara</span>
-        <button type="button" class="btn btn-sm js-close-modal">Batal</button>
       </div>
       <div class="modal-body" style="white-space: normal;">
         <p style="margin-bottom: 10px;">

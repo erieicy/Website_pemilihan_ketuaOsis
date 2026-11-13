@@ -28,8 +28,16 @@ if (!verify_csrf($_POST['csrf_token'] ?? '')) {
 $kodeToken  = $_SESSION['voter_token'] ?? '';
 $idKandidat = (int)($_POST['id_kandidat'] ?? 0);
 
-if ($kodeToken === '' || $idKandidat <= 0) {
+// Jika sesi token sudah berakhir saat tombol ditekan, beri penjelasan ke pemilih (BUG-FUN-10.4)
+if ($kodeToken === '') {
+    $_SESSION['voter_error'] = 'Sesi pemilihan Anda telah berakhir. Silakan masukkan kembali kode token Anda.';
     header('Location: index.php');
+    exit;
+}
+
+if ($idKandidat <= 0) {
+    $_SESSION['voter_error'] = 'Silakan pilih salah satu kandidat terlebih dahulu.';
+    header('Location: bilik_suara.php');
     exit;
 }
 
@@ -69,13 +77,15 @@ try {
 
     $pdo->commit();
 
-    // Hentikan sesi token pemilih segera setelah suara tercatat
+    // Hentikan sesi token pemilih & regenerasi sesi setelah suara tercatat
     unset($_SESSION['voter_token']);
+    session_regenerate_id(true);
 
 } catch (Exception $e) {
     if ($pdo->inTransaction()) {
         $pdo->rollBack();
     }
+    error_log('Vote transaction error: ' . $e->getMessage());
     $_SESSION['voter_error'] = 'Terjadi kesalahan saat menyimpan suara. Silakan coba lagi.';
     header('Location: bilik_suara.php');
     exit;

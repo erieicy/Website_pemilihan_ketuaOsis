@@ -5,6 +5,7 @@ installed.lock
 # Foto hasil upload pengguna (kecuali file bawaan)
 assets/uploads/*
 !assets/uploads/.gitkeep
+!assets/uploads/.htaccess
 !assets/uploads/default-candidate.png
 
 # File sistem operasi & editor

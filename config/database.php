@@ -1,14 +1,33 @@
 <?php
 /**
- * Koneksi Database & Fungsi Utilitas Dasar
+ * Koneksi Database, Keamanan Sesi, Rate Limiting, & Fungsi Utilitas Dasar
  * Sistem E-Voting Pemilihan Ketua OSIS (LAN)
  */
 
+date_default_timezone_set('Asia/Jakarta');
+
 if (session_status() === PHP_SESSION_NONE) {
+    ini_set('session.use_strict_mode', '1');
+    ini_set('session.use_only_cookies', '1');
+    session_set_cookie_params([
+        'lifetime' => 0,
+        'path'     => '/',
+        'domain'   => '',
+        'secure'   => (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off'),
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
     session_start();
 }
 
-date_default_timezone_set('Asia/Jakarta');
+// Kirim HTTP Security Headers & Anti-Cache untuk keamanan perangkat publik (BUG-SEC-05)
+if (!headers_sent()) {
+    header('X-Frame-Options: SAMEORIGIN');
+    header('X-Content-Type-Options: nosniff');
+    header('Referrer-Policy: same-origin');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+}
 
 $configFile = __DIR__ . '/config.php';
 $lockFile   = dirname(__DIR__) . '/installed.lock';
@@ -64,18 +83,82 @@ function require_admin(): void {
 }
 
 /**
- * Menghapus seluruh data sistem kembali ke kondisi awal (Factory Reset ke install.php):
- * - Menghapus seluruh foto unggahan di assets/uploads/ (kecuali default-candidate.png & .gitkeep)
- * - Menghapus seluruh tabel database (tokens, kandidat, admin, pengaturan)
- * - Menghapus config/config.php dan installed.lock
- * - Menghapus seluruh sesi login aktif
+ * Rate Limiting berbasis IP + Sesi untuk mencegah Brute-Force & Enumerasi (BUG-SEC-02)
+ * Mengembalikan sisa detik tunggu (0 jika diizinkan)
+ */
+function check_rate_limit(string $bucket, int $maxAttempts = 5, int $windowSeconds = 60): int {
+    $now  = time();
+    $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+    $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
+
+    $data = ['count' => 0, 'expires' => $now + $windowSeconds];
+    if (is_file($file)) {
+        $raw = @file_get_contents($file);
+        $dec = $raw ? @json_decode($raw, true) : null;
+        if (is_array($dec) && isset($dec['count'], $dec['expires']) && $dec['expires'] > $now) {
+            $data = $dec;
+        }
+    }
+
+    $sessKey = 'rl_' . $bucket;
+    if (!empty($_SESSION[$sessKey]) && $_SESSION[$sessKey]['expires'] > $now) {
+        if ($_SESSION[$sessKey]['count'] > $data['count']) {
+            $data = $_SESSION[$sessKey];
+        }
+    }
+
+    if ($data['count'] >= $maxAttempts) {
+        return max(1, (int)($data['expires'] - $now));
+    }
+    return 0;
+}
+
+/**
+ * Mencatat 1 percobaan gagal ke dalam ember Rate Limit
+ */
+function record_failed_attempt(string $bucket, int $windowSeconds = 60): void {
+    $now  = time();
+    $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+    $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
+
+    $data = ['count' => 0, 'expires' => $now + $windowSeconds];
+    if (is_file($file)) {
+        $raw = @file_get_contents($file);
+        $dec = $raw ? @json_decode($raw, true) : null;
+        if (is_array($dec) && isset($dec['count'], $dec['expires']) && $dec['expires'] > $now) {
+            $data = $dec;
+        }
+    }
+
+    $data['count']++;
+    if ($data['count'] === 1) {
+        $data['expires'] = $now + $windowSeconds;
+    }
+
+    @file_put_contents($file, json_encode($data), LOCK_EX);
+    $_SESSION['rl_' . $bucket] = $data;
+}
+
+/**
+ * Mereset catatan percobaan gagal setelah autentikasi berhasil
+ */
+function clear_rate_limit(string $bucket): void {
+    $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+    $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
+    if (is_file($file)) {
+        @unlink($file);
+    }
+    unset($_SESSION['rl_' . $bucket]);
+}
+
+/**
+ * Menghapus seluruh data sistem kembali ke kondisi awal (Factory Reset ke install.php)
  */
 function reset_system_to_initial(PDO $pdo, string $rootDir): void {
-    // 1. Bersihkan file foto unggahan kandidat
     $uploadDir = rtrim($rootDir, '/\\') . '/assets/uploads';
     if (is_dir($uploadDir)) {
         foreach (scandir($uploadDir) as $item) {
-            if ($item === '.' || $item === '..' || $item === '.gitkeep' || $item === 'default-candidate.png') {
+            if (in_array($item, ['.', '..', '.gitkeep', '.htaccess', 'default-candidate.png'], true)) {
                 continue;
             }
             $filePath = $uploadDir . '/' . $item;
@@ -85,10 +168,8 @@ function reset_system_to_initial(PDO $pdo, string $rootDir): void {
         }
     }
 
-    // 2. Hapus seluruh tabel di database agar benar-benar kembali dari nol
     $pdo->exec('DROP TABLE IF EXISTS `tokens`, `kandidat`, `admin`, `pengaturan`');
 
-    // 3. Hapus file konfigurasi & file pengunci instalasi
     $cfgPath  = rtrim($rootDir, '/\\') . '/config/config.php';
     $lockPath = rtrim($rootDir, '/\\') . '/installed.lock';
     if (file_exists($cfgPath)) {
@@ -98,7 +179,6 @@ function reset_system_to_initial(PDO $pdo, string $rootDir): void {
         @unlink($lockPath);
     }
 
-    // 4. Hentikan seluruh sesi login Admin maupun Pemilih
     $_SESSION = [];
     if (session_status() === PHP_SESSION_ACTIVE) {
         session_destroy();
@@ -113,6 +193,7 @@ try {
         PDO::ATTR_EMULATE_PREPARES   => false,
     ]);
 } catch (PDOException $ex) {
+    error_log('Database connection error: ' . $ex->getMessage());
     if (!file_exists($lockFile)) {
         $inAdmin = (basename(dirname($_SERVER['SCRIPT_NAME'] ?? '')) === 'admin');
         header('Location: ' . ($inAdmin ? '../install.php' : 'install.php'));
@@ -128,7 +209,7 @@ try {
 function get_pengaturan(PDO $pdo): array {
     $defaults = [
         'id'              => 1,
-        'nama_sekolah'    => '',
+        'nama_sekolah'    => 'SMA Negeri 1 Harapan',
         'periode'         => '2026/2027',
         'status_voting'   => 'buka',
         'tampilkan_hasil' => 0,
@@ -146,6 +227,7 @@ function get_pengaturan(PDO $pdo): array {
             return array_merge($defaults, $row);
         }
     } catch (PDOException $e) {
+        error_log('Pengaturan query error: ' . $e->getMessage());
         $inAdmin = (basename(dirname($_SERVER['SCRIPT_NAME'] ?? '')) === 'admin');
         header('Location: ' . ($inAdmin ? '../install.php' : 'install.php'));
         exit;

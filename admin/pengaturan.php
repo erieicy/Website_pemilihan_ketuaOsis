@@ -27,6 +27,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if ($namaSekolah === '' || $periode === '') {
                 $error = 'Nama sekolah dan periode pemilihan wajib diisi.';
+            } elseif (mb_strlen($namaSekolah) > 150 || mb_strlen($periode) > 20) {
+                $error = 'Nama sekolah maksimal 150 karakter dan periode maksimal 20 karakter.';
             } else {
                 $stmt = $pdo->prepare('
                     UPDATE pengaturan
@@ -38,86 +40,111 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
-        // 2. Perbarui Profil / Password Admin
+        // 2. Perbarui Profil / Password Admin (dengan Rate Limit & Penanganan Duplikasi Username)
         elseif ($action === 'save_account') {
-            $namaLengkap  = trim($_POST['nama_lengkap'] ?? '');
-            $usernameBaru = trim($_POST['username'] ?? '');
-            $passLama     = $_POST['password_lama'] ?? '';
-            $passBaru     = $_POST['password_baru'] ?? '';
-
-            $stmtAdm = $pdo->prepare('SELECT * FROM admin WHERE id = ? LIMIT 1');
-            $stmtAdm->execute([(int)$_SESSION['admin_id']]);
-            $adminRow = $stmtAdm->fetch();
-
-            if (!$adminRow || !password_verify($passLama, $adminRow['password'])) {
-                $error = 'Password saat ini salah. Perubahan akun dibatalkan.';
-            } elseif ($namaLengkap === '' || $usernameBaru === '') {
-                $error = 'Nama lengkap dan username tidak boleh kosong.';
+            $waitSec = check_rate_limit('admin_reauth', 5, 60);
+            if ($waitSec > 0) {
+                $error = "Terlalu banyak percobaan password salah. Silakan tunggu {$waitSec} detik.";
             } else {
-                if ($passBaru !== '') {
-                    if (strlen($passBaru) < 5) {
-                        $error = 'Password baru minimal terdiri dari 5 karakter.';
-                    } else {
-                        $hash = password_hash($passBaru, PASSWORD_BCRYPT);
-                        $stmtUpd = $pdo->prepare('UPDATE admin SET nama_lengkap = ?, username = ?, password = ? WHERE id = ?');
-                        $stmtUpd->execute([$namaLengkap, $usernameBaru, $hash, (int)$adminRow['id']]);
-                    }
-                } else {
-                    $stmtUpd = $pdo->prepare('UPDATE admin SET nama_lengkap = ?, username = ? WHERE id = ?');
-                    $stmtUpd->execute([$namaLengkap, $usernameBaru, (int)$adminRow['id']]);
-                }
+                $namaLengkap  = trim($_POST['nama_lengkap'] ?? '');
+                $usernameBaru = trim($_POST['username'] ?? '');
+                $passLama     = $_POST['password_lama'] ?? '';
+                $passBaru     = $_POST['password_baru'] ?? '';
 
-                if ($error === '') {
-                    $_SESSION['admin_nama']     = $namaLengkap;
-                    $_SESSION['admin_username'] = $usernameBaru;
-                    $message = 'Informasi akun administrator berhasil diperbarui.';
+                $stmtAdm = $pdo->prepare('SELECT * FROM admin WHERE id = ? LIMIT 1');
+                $stmtAdm->execute([(int)$_SESSION['admin_id']]);
+                $adminRow = $stmtAdm->fetch();
+
+                if (!$adminRow || !password_verify($passLama, $adminRow['password'])) {
+                    record_failed_attempt('admin_reauth', 60);
+                    $error = 'Password saat ini salah. Perubahan akun dibatalkan.';
+                } elseif ($namaLengkap === '' || $usernameBaru === '') {
+                    $error = 'Nama lengkap dan username tidak boleh kosong.';
+                } elseif (mb_strlen($namaLengkap) > 100 || mb_strlen($usernameBaru) > 50) {
+                    $error = 'Nama lengkap maksimal 100 karakter dan username maksimal 50 karakter.';
+                } elseif ($passBaru !== '' && strlen($passBaru) < 5) {
+                    $error = 'Password baru minimal terdiri dari 5 karakter.';
+                } else {
+                    clear_rate_limit('admin_reauth');
+                    try {
+                        if ($passBaru !== '') {
+                            $hash = password_hash($passBaru, PASSWORD_BCRYPT);
+                            $stmtUpd = $pdo->prepare('UPDATE admin SET nama_lengkap = ?, username = ?, password = ? WHERE id = ?');
+                            $stmtUpd->execute([$namaLengkap, $usernameBaru, $hash, (int)$adminRow['id']]);
+                        } else {
+                            $stmtUpd = $pdo->prepare('UPDATE admin SET nama_lengkap = ?, username = ? WHERE id = ?');
+                            $stmtUpd->execute([$namaLengkap, $usernameBaru, (int)$adminRow['id']]);
+                        }
+                        $_SESSION['admin_nama']     = $namaLengkap;
+                        $_SESSION['admin_username'] = $usernameBaru;
+                        $message = 'Informasi akun administrator berhasil diperbarui.';
+                    } catch (PDOException $e) {
+                        error_log('Admin account update error: ' . $e->getMessage());
+                        $error = 'Username tersebut sudah digunakan oleh akun lain. Gunakan username berbeda.';
+                    }
                 }
             }
         }
 
         // 3. Reset Data Simulasi (FR-12)
         elseif ($action === 'reset_simulasi') {
-            $passConfirm = $_POST['password_konfirmasi'] ?? '';
-
-            $stmtAdm = $pdo->prepare('SELECT password FROM admin WHERE id = ? LIMIT 1');
-            $stmtAdm->execute([(int)$_SESSION['admin_id']]);
-            $adminRow = $stmtAdm->fetch();
-
-            if (!$adminRow || !password_verify($passConfirm, $adminRow['password'])) {
-                $error = 'Password konfirmasi salah! Reset data simulasi dibatalkan.';
+            $waitSec = check_rate_limit('admin_reauth', 5, 60);
+            if ($waitSec > 0) {
+                $error = "Terlalu banyak percobaan password salah. Silakan tunggu {$waitSec} detik.";
             } else {
-                try {
-                    $pdo->beginTransaction();
-                    $pdo->exec('DELETE FROM tokens');
-                    $pdo->exec('UPDATE kandidat SET jumlah_suara = 0');
-                    $pdo->commit();
-                    $message = 'Reset Data Simulasi berhasil. Seluruh token telah dihapus dan perolehan suara kandidat kembali ke 0.';
-                } catch (Exception $e) {
-                    if ($pdo->inTransaction()) {
-                        $pdo->rollBack();
+                $passConfirm = $_POST['password_konfirmasi'] ?? '';
+
+                $stmtAdm = $pdo->prepare('SELECT password FROM admin WHERE id = ? LIMIT 1');
+                $stmtAdm->execute([(int)$_SESSION['admin_id']]);
+                $adminRow = $stmtAdm->fetch();
+
+                if (!$adminRow || !password_verify($passConfirm, $adminRow['password'])) {
+                    record_failed_attempt('admin_reauth', 60);
+                    $error = 'Password konfirmasi salah! Reset data simulasi dibatalkan.';
+                } else {
+                    clear_rate_limit('admin_reauth');
+                    try {
+                        $pdo->beginTransaction();
+                        $pdo->exec('DELETE FROM tokens');
+                        $pdo->exec('UPDATE kandidat SET jumlah_suara = 0');
+                        $pdo->commit();
+                        $message = 'Reset Data Simulasi berhasil. Seluruh token telah dihapus dan perolehan suara kandidat kembali ke 0.';
+                    } catch (Exception $e) {
+                        if ($pdo->inTransaction()) {
+                            $pdo->rollBack();
+                        }
+                        error_log('Reset simulasi error: ' . $e->getMessage());
+                        $error = 'Gagal mereset data simulasi. Silakan coba kembali.';
                     }
-                    $error = 'Gagal mereset data simulasi: ' . $e->getMessage();
                 }
             }
         }
 
         // 4. Buka Kunci install.php & Reset Total Sistem dari Awal (Factory Reset)
         elseif ($action === 'unlock_installer') {
-            $passInstall = $_POST['password_install'] ?? '';
-
-            $stmtAdm = $pdo->prepare('SELECT password FROM admin WHERE id = ? LIMIT 1');
-            $stmtAdm->execute([(int)$_SESSION['admin_id']]);
-            $adminRow = $stmtAdm->fetch();
-
-            if (!$adminRow || !password_verify($passInstall, $adminRow['password'])) {
-                $error = 'Password konfirmasi salah! Reset total ke install.php dibatalkan.';
+            $waitSec = check_rate_limit('admin_reauth', 5, 60);
+            if ($waitSec > 0) {
+                $error = "Terlalu banyak percobaan password salah. Silakan tunggu {$waitSec} detik.";
             } else {
-                try {
-                    reset_system_to_initial($pdo, dirname(__DIR__));
-                    header('Location: ../install.php');
-                    exit;
-                } catch (Exception $e) {
-                    $error = 'Gagal mereset sistem ke awal: ' . $e->getMessage();
+                $passInstall = $_POST['password_install'] ?? '';
+
+                $stmtAdm = $pdo->prepare('SELECT password FROM admin WHERE id = ? LIMIT 1');
+                $stmtAdm->execute([(int)$_SESSION['admin_id']]);
+                $adminRow = $stmtAdm->fetch();
+
+                if (!$adminRow || !password_verify($passInstall, $adminRow['password'])) {
+                    record_failed_attempt('admin_reauth', 60);
+                    $error = 'Password konfirmasi salah! Reset total ke install.php dibatalkan.';
+                } else {
+                    clear_rate_limit('admin_reauth');
+                    try {
+                        reset_system_to_initial($pdo, dirname(__DIR__));
+                        header('Location: ../install.php');
+                        exit;
+                    } catch (Exception $e) {
+                        error_log('Unlock installer error: ' . $e->getMessage());
+                        $error = 'Gagal mereset sistem ke awal. Silakan coba kembali.';
+                    }
                 }
             }
         }
@@ -212,6 +239,7 @@ $pengaturan = get_pengaturan($pdo);
                     id="nama_sekolah"
                     name="nama_sekolah"
                     class="form-control"
+                    maxlength="150"
                     value="<?= e($pengaturan['nama_sekolah']) ?>"
                     required
                   >
@@ -224,6 +252,7 @@ $pengaturan = get_pengaturan($pdo);
                     id="periode"
                     name="periode"
                     class="form-control"
+                    maxlength="20"
                     value="<?= e($pengaturan['periode']) ?>"
                     placeholder="Contoh: 2026/2027"
                     required
@@ -304,6 +333,7 @@ $pengaturan = get_pengaturan($pdo);
                     id="nama_lengkap"
                     name="nama_lengkap"
                     class="form-control"
+                    maxlength="100"
                     value="<?= e($_SESSION['admin_nama'] ?? '') ?>"
                     required
                   >
@@ -316,6 +346,7 @@ $pengaturan = get_pengaturan($pdo);
                     id="username"
                     name="username"
                     class="form-control mono"
+                    maxlength="50"
                     value="<?= e($_SESSION['admin_username'] ?? '') ?>"
                     required
                   >

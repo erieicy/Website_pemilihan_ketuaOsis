@@ -8,19 +8,22 @@ require_once dirname(__DIR__) . '/config/database.php';
 require_admin();
 
 $message = $_SESSION['flash_hasil_msg'] ?? '';
-unset($_SESSION['flash_hasil_msg']);
+$error   = $_SESSION['flash_hasil_err'] ?? '';
+unset($_SESSION['flash_hasil_msg'], $_SESSION['flash_hasil_err']);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'toggle_lock') {
-    if (verify_csrf($_POST['csrf_token'] ?? '')) {
+    if (!verify_csrf($_POST['csrf_token'] ?? '')) {
+        $_SESSION['flash_hasil_err'] = 'Token keamanan tidak valid. Silakan coba lagi.';
+    } else {
         $newState = (int)($_POST['tampilkan_hasil'] ?? 0) === 1 ? 1 : 0;
         $stmtUpd  = $pdo->prepare('UPDATE pengaturan SET tampilkan_hasil = ? WHERE id = 1');
         $stmtUpd->execute([$newState]);
         $_SESSION['flash_hasil_msg'] = $newState === 1
             ? 'Hasil perhitungan suara dibuka dan ditampilkan di layar.'
             : 'Hasil perhitungan suara berhasil dikunci (disembunyikan).';
-        header('Location: hasil.php');
-        exit;
     }
+    header('Location: hasil.php');
+    exit;
 }
 
 $pengaturan = get_pengaturan($pdo);
@@ -108,6 +111,9 @@ foreach ($kandidatList as $k) {
       <?php if ($message !== ''): ?>
         <div class="alert alert-success no-print"><?= e($message) ?></div>
       <?php endif; ?>
+      <?php if ($error !== ''): ?>
+        <div class="alert alert-error no-print"><?= e($error) ?></div>
+      <?php endif; ?>
 
       <div class="stats-grid">
         <div class="stat-card">
@@ -160,7 +166,7 @@ foreach ($kandidatList as $k) {
                 <?php foreach ($kandidatList as $k): ?>
                   <?php
                     $suara   = (int)$k['jumlah_suara'];
-                    $persen  = $totalSuaraSah > 0 ? round(($suara / $totalSuaraSah) * 100, 2) : 0;
+                    $persen = $totalSuaraSah > 0 ? round(($suara / $totalSuaraSah) * 100, 1) : 0;
                     $foto    = !empty($k['nama_file_foto']) ? basename($k['nama_file_foto']) : 'default-candidate.png';
                     $fotoUrl = '../assets/uploads/' . $foto;
                     if (!file_exists(dirname(__DIR__) . '/assets/uploads/' . $foto)) {
@@ -216,7 +222,7 @@ foreach ($kandidatList as $k) {
                   <?php foreach ($kandidatList as $k): ?>
                     <?php
                       $suara  = (int)$k['jumlah_suara'];
-                      $persen = $totalSuaraSah > 0 ? round(($suara / $totalSuaraSah) * 100, 2) : 0;
+                      $persen = $totalSuaraSah > 0 ? round(($suara / $totalSuaraSah) * 100, 1) : 0;
                     ?>
                     <tr>
                       <td class="mono" style="font-weight: 700;"><?= str_pad((string)$k['no_urut'], 2, '0', STR_PAD_LEFT) ?></td>

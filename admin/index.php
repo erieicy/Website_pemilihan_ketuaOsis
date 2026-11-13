@@ -336,6 +336,17 @@ $adminLanUrl = $scheme . '://' . $primaryIp . $portPart . $basePath . '/admin/';
   <script src="../assets/js/admin.js"></script>
   <script>
     (function () {
+      function fallbackCopy(url, btn, originalText) {
+        var temp = document.createElement('input');
+        document.body.appendChild(temp);
+        temp.value = url;
+        temp.select();
+        try { document.execCommand('copy'); } catch (_) {}
+        document.body.removeChild(temp);
+        btn.textContent = 'Link Tersalin!';
+        setTimeout(function () { btn.textContent = originalText; }, 1800);
+      }
+
       document.querySelectorAll('.js-copy-link').forEach(function (btn) {
         btn.addEventListener('click', function () {
           var url = btn.getAttribute('data-copy') || '';
@@ -344,16 +355,11 @@ $adminLanUrl = $scheme . '://' . $primaryIp . $portPart . $basePath . '/admin/';
             navigator.clipboard.writeText(url).then(function () {
               btn.textContent = 'Link Tersalin!';
               setTimeout(function () { btn.textContent = originalText; }, 1800);
+            }).catch(function () {
+              fallbackCopy(url, btn, originalText);
             });
           } else {
-            var temp = document.createElement('input');
-            document.body.appendChild(temp);
-            temp.value = url;
-            temp.select();
-            document.execCommand('copy');
-            document.body.removeChild(temp);
-            btn.textContent = 'Link Tersalin!';
-            setTimeout(function () { btn.textContent = originalText; }, 1800);
+            fallbackCopy(url, btn, originalText);
           }
         });
       });

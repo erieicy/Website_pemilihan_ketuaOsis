@@ -6,8 +6,13 @@
 
 require_once __DIR__ . '/config/database.php';
 
-if (isset($_GET['keluar'])) {
-    unset($_SESSION['voter_token']);
+// Keluar bilik suara menggunakan metode POST bertoken CSRF (BUG-SEC-03)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'keluar') {
+    if (verify_csrf($_POST['csrf_token'] ?? '')) {
+        unset($_SESSION['voter_token']);
+        session_regenerate_id(true);
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    }
     header('Location: index.php');
     exit;
 }
@@ -32,12 +37,15 @@ unset($_SESSION['voter_error']);
 
 $inputToken = '';
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isOpen) {
-    if (!verify_csrf($_POST['csrf_token'] ?? '')) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isOpen && ($_POST['action'] ?? '') !== 'keluar') {
+    $waitSec = check_rate_limit('voter_token', 8, 60);
+    if ($waitSec > 0) {
+        $error = "Terlalu banyak percobaan kode token yang gagal. Silakan tunggu {$waitSec} detik.";
+    } elseif (!verify_csrf($_POST['csrf_token'] ?? '')) {
         $error = 'Sesi formulir tidak valid. Silakan coba kembali.';
     } else {
         $inputToken = strtoupper(trim($_POST['kode_token'] ?? ''));
-        $inputToken = preg_replace('/[^A-Z0-9]/', '', $inputToken);
+        $inputToken = substr(preg_replace('/[^A-Z0-9]/', '', $inputToken), 0, 6);
 
         if ($inputToken === '') {
             $error = 'Masukkan kode token terlebih dahulu.';
@@ -48,12 +56,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isOpen) {
 
             if (!$row) {
                 // Kondisi A: Token tidak ditemukan
+                record_failed_attempt('voter_token', 60);
                 $error = 'Kode tidak terdaftar! Periksa kembali ketikan Anda.';
             } elseif ((int)$row['sudah_dipakai'] === 1) {
                 // Kondisi B: Token sudah pernah dipakai
+                record_failed_attempt('voter_token', 60);
                 $error = 'Kode ini sudah pernah digunakan dan tidak berlaku lagi!';
             } else {
-                // Kondisi C: Token sah dan belum dipakai
+                // Kondisi C: Token sah dan belum dipakai (Regenerasi ID Sesi - BUG-SEC-03)
+                clear_rate_limit('voter_token');
+                session_regenerate_id(true);
                 $_SESSION['voter_token'] = $row['kode_token'];
                 header('Location: bilik_suara.php');
                 exit;
@@ -101,7 +113,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isOpen) {
               id="kode_token"
               name="kode_token"
               class="token-input"
-              maxlength="10"
+              maxlength="6"
               placeholder="XXXXXX"
               value="<?= e($inputToken) ?>"
               autofocus
@@ -124,13 +136,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isOpen) {
   <script>
     (function () {
       var input = document.getElementById('kode_token');
-      if (input) {
-        input.addEventListener('input', function () {
-          var pos = this.selectionStart;
-          this.value = this.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
-          this.setSelectionRange(pos, pos);
-        });
-      }
+      if (!input) return;
+
+      input.addEventListener('paste', function (e) {
+        var clipboard = e.clipboardData || window.clipboardData;
+        if (!clipboard) return;
+        e.preventDefault();
+        var pasted = (clipboard.getData('text') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+        this.value = pasted;
+        this.setSelectionRange(pasted.length, pasted.length);
+      });
+
+      input.addEventListener('input', function () {
+        var rawPos = this.selectionStart || 0;
+        var cleanBefore = this.value.slice(0, rawPos).toUpperCase().replace(/[^A-Z0-9]/g, '');
+        var cleanFull   = this.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+        var newPos      = Math.min(cleanFull.length, cleanBefore.length);
+        this.value = cleanFull;
+        this.setSelectionRange(newPos, newPos);
+      });
     })();
   </script>
 </body>

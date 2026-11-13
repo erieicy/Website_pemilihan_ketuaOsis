@@ -16,7 +16,10 @@ $error      = '';
 $username   = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (!verify_csrf($_POST['csrf_token'] ?? '')) {
+    $waitSec = check_rate_limit('admin_login', 5, 60);
+    if ($waitSec > 0) {
+        $error = "Terlalu banyak percobaan login gagal. Silakan tunggu {$waitSec} detik.";
+    } elseif (!verify_csrf($_POST['csrf_token'] ?? '')) {
         $error = 'Sesi formulir tidak valid. Silakan muat ulang halaman.';
     } else {
         $username = trim($_POST['username'] ?? '');
@@ -30,13 +33,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $admin = $stmt->fetch();
 
             if ($admin && password_verify($password, $admin['password'])) {
+                clear_rate_limit('admin_login');
                 session_regenerate_id(true);
+                $_SESSION['csrf_token']     = bin2hex(random_bytes(32));
                 $_SESSION['admin_id']       = (int)$admin['id'];
                 $_SESSION['admin_username'] = $admin['username'];
                 $_SESSION['admin_nama']     = $admin['nama_lengkap'];
                 header('Location: index.php');
                 exit;
             } else {
+                record_failed_attempt('admin_login', 60);
                 $error = 'Username atau password salah.';
             }
         }
@@ -74,6 +80,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             id="username"
             name="username"
             class="form-control mono"
+            maxlength="50"
             value="<?= e($username) ?>"
             autofocus
             required

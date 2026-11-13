@@ -1,0 +1,13 @@
+# Nonaktifkan directory listing
+Options -Indexes
+
+# Blokir akses langsung ke file sensitif dan dokumentasi internal
+<FilesMatch "^(installed\.lock|README\.md|LICENSE|\.gitignore|\.gitattributes)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>

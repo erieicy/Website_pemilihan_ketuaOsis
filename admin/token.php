@@ -126,8 +126,9 @@ if ($statusFilter === '0' || $statusFilter === '1') {
     $params[]       = (int)$statusFilter;
 }
 if ($searchQuery !== '') {
-    $whereClauses[] = 'kode_token LIKE ?';
-    $params[]       = '%' . $searchQuery . '%';
+    $escapedSearch  = str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $searchQuery);
+    $whereClauses[] = "kode_token LIKE ? ESCAPE '\\\\'";
+    $params[]       = '%' . $escapedSearch . '%';
 }
 
 $whereSql = !empty($whereClauses) ? ('WHERE ' . implode(' AND ', $whereClauses)) : '';

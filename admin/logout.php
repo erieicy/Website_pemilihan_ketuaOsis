@@ -4,10 +4,11 @@
  * Sistem E-Voting Pemilihan Ketua OSIS (LAN)
  */
 
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+require_once dirname(__DIR__) . '/config/database.php';
 
 unset($_SESSION['admin_id'], $_SESSION['admin_username'], $_SESSION['admin_nama']);
+session_regenerate_id(true);
+$_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+
 header('Location: login.php');
 exit;
