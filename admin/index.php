@@ -326,13 +326,6 @@ $adminLanUrl = $scheme . '://' . $primaryIp . $portPart . $basePath . '/admin/';
                     <span class="text-muted" style="font-size: 12px; margin-left: 8px;">Dapat diubah di menu <a href="pengaturan.php">Pengaturan</a></span>
                   </td>
                 </tr>
-                <tr>
-                  <th>Wizard Instalasi (<code>install.php</code>)</th>
-                  <td>
-                    <span class="badge">Terkunci (<code>installed.lock</code>)</span>
-                    <a href="pengaturan.php#panel-installer" class="btn btn-sm" style="margin-left: 8px;">Reset Total / Instal Ulang</a>
-                  </td>
-                </tr>
               </tbody>
             </table>
           </div>
@@ -340,6 +333,7 @@ $adminLanUrl = $scheme . '://' . $primaryIp . $portPart . $basePath . '/admin/';
       </div>
     </main>
   </div>
+  <script src="../assets/js/admin.js"></script>
   <script>
     (function () {
       document.querySelectorAll('.js-copy-link').forEach(function (btn) {

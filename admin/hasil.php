@@ -234,5 +234,6 @@ foreach ($kandidatList as $k) {
       <?php endif; ?>
     </main>
   </div>
+  <script src="../assets/js/admin.js"></script>
 </body>
 </html>

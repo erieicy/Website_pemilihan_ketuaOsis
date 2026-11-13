@@ -74,12 +74,12 @@ Website_pemilihan_ketuaOsis/
 ### Cara 1: Instalasi Otomatis via Web Installer (Direkomendasikan)
 
 1. Salin atau *clone* repositori ini ke dalam folder web server Anda:
-   - **XAMPP:** `C:\xampp\htdocs\evoting-osis`
-   - **Laragon:** `C:\laragon\www\evoting-osis`
+   - **XAMPP:** `C:\xampp\htdocs\Website_pemilihan_ketuaOsis`
+   - **Laragon:** `C:\laragon\www\Website_pemilihan_ketuaOsis`
 2. Nyalakan modul **Apache** dan **MySQL** pada panel kontrol XAMPP atau Laragon.
 3. Buka browser dan akses:
    ```text
-   http://localhost/evoting-osis/install.php
+   http://localhost/Website_pemilihan_ketuaOsis/install.php
    ```
 4. Isi konfigurasi database (`localhost`, user `root`, password kosong), nama sekolah, tema tampilan awal (`White` atau `Dark`), serta username dan password Admin pertama.
 5. Klik **Jalankan Instalasi Sekarang**. Sistem akan membuat database, tabel, file `config/config.php`, dan mengunci installer dengan file `installed.lock`.
@@ -90,7 +90,7 @@ Website_pemilihan_ketuaOsis/
 2. Import file `database/database.sql`.
 3. Salin file `config/config.example.php` menjadi `config/config.php` dan sesuaikan kredensial database jika diperlukan.
 4. Buat file kosong bernama `installed.lock` di direktori utama proyek.
-5. Login ke halaman Admin (`http://localhost/evoting-osis/admin/login.php`) menggunakan akun bawaan:
+5. Login ke halaman Admin (`http://localhost/Website_pemilihan_ketuaOsis/admin/login.php`) menggunakan akun bawaan:
    - **Username:** `admin`
    - **Password:** `admin123`
 
@@ -112,7 +112,7 @@ Agar perangkat di bilik suara (Smartphone, Tablet, atau Laptop klien) dapat meng
    *(Alamat IP lokal ini juga ditampilkan langsung di tabel bawah halaman **Dashboard Admin**).*
 4. Pada browser perangkat di setiap bilik suara, buka alamat berikut:
    ```text
-   http://192.168.1.10/evoting-osis/
+   http://192.168.1.10/Website_pemilihan_ketuaOsis/
    ```
 5. Pastikan **Windows Firewall** pada Laptop Server mengizinkan koneksi masuk untuk port `80` (Apache HTTP Server).
 

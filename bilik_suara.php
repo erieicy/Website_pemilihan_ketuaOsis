@@ -96,7 +96,7 @@ $kandidatList = $stmtKandidat->fetchAll();
             <div class="candidate-actions">
               <button
                 type="button"
-                class="btn js-open-visimisi"
+                class="btn btn-block js-open-visimisi"
                 data-no-urut="<?= e($noUrutPad) ?>"
                 data-nama="<?= e($namaPaslon) ?>"
                 data-visi="<?= e($k['visi']) ?>"
@@ -106,7 +106,7 @@ $kandidatList = $stmtKandidat->fetchAll();
               </button>
               <button
                 type="button"
-                class="btn btn-primary js-open-confirm"
+                class="btn btn-primary btn-block js-open-confirm"
                 data-id="<?= (int)$k['id'] ?>"
                 data-no-urut="<?= e((string)$k['no_urut']) ?>"
                 data-nama="<?= e($namaPaslon) ?>"
