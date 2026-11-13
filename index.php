@@ -155,8 +155,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isOpen && ($_POST['action'] ?? '')
 
       <div class="auth-footer">
         <span>Jaringan Lokal (LAN)</span>
-        <a href="admin/login.php">Panel Panitia</a>
-      </div>
+        <a href="admin/login.php">Panel Panitia &rarr;</a>
+      </div>  
     </div>
   </div>
   <script>

@@ -41,54 +41,69 @@ if ($idKandidat <= 0) {
     exit;
 }
 
-try {
-    $pdo->beginTransaction();
+$maxTxAttempts = 5;
+for ($txAttempt = 1; $txAttempt <= $maxTxAttempts; $txAttempt++) {
+    try {
+        // Kurangi gap lock pada index sekunder (idx_sudah_dipakai) saat banyak komputer submit serentak
+        $pdo->exec('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+        $pdo->beginTransaction();
 
-    // 1. Update atomik pada tabel tokens (Race Condition Protection)
-    $stmtToken = $pdo->prepare('
-        UPDATE tokens
-        SET sudah_dipakai = 1, used_at = NOW()
-        WHERE kode_token = ? AND sudah_dipakai = 0
-    ');
-    $stmtToken->execute([$kodeToken]);
+        // 1. Update atomik pada tabel tokens (Race Condition Protection)
+        $stmtToken = $pdo->prepare('
+            UPDATE tokens
+            SET sudah_dipakai = 1, used_at = NOW()
+            WHERE kode_token = ? AND sudah_dipakai = 0
+        ');
+        $stmtToken->execute([$kodeToken]);
 
-    if ($stmtToken->rowCount() !== 1) {
-        $pdo->rollBack();
+        if ($stmtToken->rowCount() !== 1) {
+            $pdo->rollBack();
+            unset($_SESSION['voter_token']);
+            $_SESSION['voter_error'] = 'Kode ini sudah pernah digunakan dan tidak berlaku lagi!';
+            header('Location: index.php');
+            exit;
+        }
+
+        // 2. Tambahkan jumlah suara kandidat tanpa menyimpan relasi ke token (Voter Anonymity)
+        $stmtVote = $pdo->prepare('
+            UPDATE kandidat
+            SET jumlah_suara = jumlah_suara + 1
+            WHERE id = ?
+        ');
+        $stmtVote->execute([$idKandidat]);
+
+        if ($stmtVote->rowCount() !== 1) {
+            $pdo->rollBack();
+            $_SESSION['voter_error'] = 'Kandidat tidak ditemukan. Silakan pilih kembali.';
+            header('Location: bilik_suara.php');
+            exit;
+        }
+
+        $pdo->commit();
+
+        // Hentikan sesi token pemilih & regenerasi sesi setelah suara tercatat
         unset($_SESSION['voter_token']);
-        $_SESSION['voter_error'] = 'Kode ini sudah pernah digunakan dan tidak berlaku lagi!';
-        header('Location: index.php');
-        exit;
-    }
+        session_regenerate_id(true);
+        break;
 
-    // 2. Tambahkan jumlah suara kandidat tanpa menyimpan relasi ke token (Voter Anonymity)
-    $stmtVote = $pdo->prepare('
-        UPDATE kandidat
-        SET jumlah_suara = jumlah_suara + 1
-        WHERE id = ?
-    ');
-    $stmtVote->execute([$idKandidat]);
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        $isLockErr = ($e instanceof PDOException) && (
+            (string)$e->getCode() === '40001' ||
+            in_array((int)($e->errorInfo[1] ?? 0), [1213, 1205], true)
+        );
+        if ($isLockErr && $txAttempt < $maxTxAttempts) {
+            usleep(random_int(15000, 65000));
+            continue;
+        }
 
-    if ($stmtVote->rowCount() !== 1) {
-        $pdo->rollBack();
-        $_SESSION['voter_error'] = 'Kandidat tidak ditemukan. Silakan pilih kembali.';
+        error_log('Vote transaction error: ' . $e->getMessage());
+        $_SESSION['voter_error'] = 'Terjadi kesalahan saat menyimpan suara. Silakan coba lagi.';
         header('Location: bilik_suara.php');
         exit;
     }
-
-    $pdo->commit();
-
-    // Hentikan sesi token pemilih & regenerasi sesi setelah suara tercatat
-    unset($_SESSION['voter_token']);
-    session_regenerate_id(true);
-
-} catch (Exception $e) {
-    if ($pdo->inTransaction()) {
-        $pdo->rollBack();
-    }
-    error_log('Vote transaction error: ' . $e->getMessage());
-    $_SESSION['voter_error'] = 'Terjadi kesalahan saat menyimpan suara. Silakan coba lagi.';
-    header('Location: bilik_suara.php');
-    exit;
 }
 ?>
 <!DOCTYPE html>
