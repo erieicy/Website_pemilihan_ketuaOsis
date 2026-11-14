@@ -6,9 +6,17 @@
 
 require_once dirname(__DIR__) . '/config/database.php';
 
-unset($_SESSION['admin_id'], $_SESSION['admin_username'], $_SESSION['admin_nama']);
-session_regenerate_id(true);
-$_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && verify_csrf($_POST['csrf_token'] ?? '')) {
+    unset($_SESSION['admin_id'], $_SESSION['admin_username'], $_SESSION['admin_nama'], $_SESSION['admin_pass_hash']);
+    session_regenerate_id(true);
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    header('Location: login.php');
+    exit;
+}
 
-header('Location: login.php');
+if (!empty($_SESSION['admin_id'])) {
+    header('Location: index.php');
+} else {
+    header('Location: login.php');
+}
 exit;

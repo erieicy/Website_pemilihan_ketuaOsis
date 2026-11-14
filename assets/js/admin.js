@@ -106,14 +106,35 @@
   const previewMeta = document.getElementById('preview-meta');
 
   if (fileInput && previewImg) {
+    const defaultSrc  = previewImg.getAttribute('src') || '';
+    const defaultMeta = previewMeta ? previewMeta.textContent : '';
+
+    function resetPreview() {
+      previewImg.src = defaultSrc;
+      if (previewMeta) {
+        previewMeta.textContent = defaultMeta;
+      }
+    }
+
     fileInput.addEventListener('change', function () {
       const file = fileInput.files && fileInput.files[0];
-      if (!file) return;
+      if (!file) {
+        resetPreview();
+        return;
+      }
 
       const maxBytes = 2 * 1024 * 1024;
       if (file.size > maxBytes) {
         alert('Ukuran file melebihi batas maksimal 2 MB.');
         fileInput.value = '';
+        resetPreview();
+        return;
+      }
+
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+        alert('Format file tidak valid. Gunakan gambar JPG, JPEG, PNG, atau WEBP.');
+        fileInput.value = '';
+        resetPreview();
         return;
       }
 

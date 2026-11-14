@@ -29,14 +29,43 @@ if (!headers_sent()) {
     header('Pragma: no-cache');
 }
 
+/**
+ * Memeriksa apakah request berasal dari polling status / AJAX
+ */
+function is_ajax_or_status_request(): bool {
+    return isset($_GET['ajax'])
+        || isset($_GET['status_check'])
+        || strtolower($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'xmlhttprequest';
+}
+
+/**
+ * Mengirim respons error JSON dan menghentikan eksekusi
+ */
+function send_json_error(int $statusCode, array $payload): void {
+    http_response_code($statusCode);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($payload);
+    exit;
+}
+
+/**
+ * Mengalihkan permintaan ke halaman installer (install.php)
+ */
+function redirect_to_installer(): void {
+    $inAdmin = (basename(dirname($_SERVER['SCRIPT_NAME'] ?? '')) === 'admin');
+    header('Location: ' . ($inAdmin ? '../install.php' : 'install.php'));
+    exit;
+}
+
 $configFile = __DIR__ . '/config.php';
 $lockFile   = dirname(__DIR__) . '/installed.lock';
 
 // Jika belum terinstal (installed.lock tidak ada), arahkan langsung ke install.php
 if (!file_exists($lockFile)) {
-    $inAdmin = (basename(dirname($_SERVER['SCRIPT_NAME'] ?? '')) === 'admin');
-    header('Location: ' . ($inAdmin ? '../install.php' : 'install.php'));
-    exit;
+    if (is_ajax_or_status_request()) {
+        send_json_error(503, ['error' => 'uninstalled']);
+    }
+    redirect_to_installer();
 }
 
 if (file_exists($configFile)) {
@@ -76,46 +105,56 @@ function verify_csrf(?string $token): bool {
  * Proteksi halaman Administrator (mengembalikan HTTP 401 JSON untuk request AJAX)
  */
 function require_admin(): void {
-    if (empty($_SESSION['admin_id'])) {
-        $isAjax = isset($_GET['ajax']) || strtolower($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'xmlhttprequest';
-        if ($isAjax) {
-            http_response_code(401);
-            header('Content-Type: application/json; charset=utf-8');
-            echo json_encode(['error' => 'unauthorized', 'login_url' => 'login.php']);
-            exit;
+    global $pdo;
+
+    $isAjax = isset($_GET['ajax']) || strtolower($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'xmlhttprequest';
+
+    if (!empty($_SESSION['admin_id']) && isset($pdo) && $pdo instanceof PDO) {
+        try {
+            $stmt = $pdo->prepare('SELECT id, username, nama_lengkap, password FROM admin WHERE id = ? LIMIT 1');
+            $stmt->execute([(int)$_SESSION['admin_id']]);
+            $adminRow = $stmt->fetch();
+
+            if (!$adminRow || (!empty($_SESSION['admin_pass_hash']) && !hash_equals((string)$_SESSION['admin_pass_hash'], (string)$adminRow['password']))) {
+                unset($_SESSION['admin_id'], $_SESSION['admin_username'], $_SESSION['admin_nama'], $_SESSION['admin_pass_hash']);
+            } else {
+                $_SESSION['admin_username']  = $adminRow['username'];
+                $_SESSION['admin_nama']      = $adminRow['nama_lengkap'];
+                $_SESSION['admin_pass_hash'] = $adminRow['password'];
+                return;
+            }
+        } catch (PDOException $e) {
+            error_log('Admin session validation error: ' . $e->getMessage());
+            unset($_SESSION['admin_id'], $_SESSION['admin_username'], $_SESSION['admin_nama'], $_SESSION['admin_pass_hash']);
         }
-        header('Location: login.php');
-        exit;
     }
+
+    if ($isAjax) {
+        send_json_error(401, ['error' => 'unauthorized', 'login_url' => 'login.php']);
+    }
+    header('Location: login.php');
+    exit;
 }
 
 /**
- * Membaca data rate limit yang masih aktif (belum melewati masa berlaku)
+ * Mengembalikan path file rate limit untuk bucket dan IP saat ini
  */
-function get_rate_limit_data(string $bucket, int $maxAttempts, int $now): array {
-    $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
-    $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
+function rate_limit_file_path(string $bucket): string {
+    $ip = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+    return rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
+}
 
-    $default    = ['count' => 0, 'expires' => 0, 'window_expires' => 0];
-    $candidates = [];
-
-    if (is_file($file)) {
-        $raw = @file_get_contents($file);
-        $dec = $raw ? @json_decode($raw, true) : null;
-        if (is_array($dec) && isset($dec['count'], $dec['expires'])) {
-            $candidates[] = $dec;
-        }
-    }
-
-    $sessKey = 'rl_' . $bucket;
-    if (!empty($_SESSION[$sessKey]) && is_array($_SESSION[$sessKey]) && isset($_SESSION[$sessKey]['count'], $_SESSION[$sessKey]['expires'])) {
-        $candidates[] = $_SESSION[$sessKey];
-    }
-
-    $best = $default;
+/**
+ * Memilih entri rate limit aktif dengan jumlah percobaan tertinggi
+ */
+function select_active_rate_limit(array $candidates, int $maxAttempts, int $now): array {
+    $best = ['count' => 0, 'expires' => 0, 'window_expires' => 0];
     foreach ($candidates as $item) {
-        $count   = (int)($item['count'] ?? 0);
-        $expires = (int)($item['expires'] ?? 0);
+        if (!is_array($item) || !isset($item['count'], $item['expires'])) {
+            continue;
+        }
+        $count   = (int)$item['count'];
+        $expires = (int)$item['expires'];
         $winExp  = (int)($item['window_expires'] ?? $expires);
 
         $isActive = ($count >= $maxAttempts) ? ($expires > $now) : ($winExp > $now);
@@ -127,8 +166,38 @@ function get_rate_limit_data(string $bucket, int $maxAttempts, int $now): array 
             ];
         }
     }
-
     return $best;
+}
+
+/**
+ * Membaca data rate limit yang masih aktif (belum melewati masa berlaku)
+ */
+function get_rate_limit_data(string $bucket, int $maxAttempts, int $now): array {
+    $file       = rate_limit_file_path($bucket);
+    $candidates = [];
+
+    if (is_file($file)) {
+        $raw = false;
+        $fp  = @fopen($file, 'rb');
+        if ($fp !== false) {
+            if (@flock($fp, LOCK_SH)) {
+                $raw = stream_get_contents($fp);
+                @flock($fp, LOCK_UN);
+            }
+            fclose($fp);
+        }
+        $dec = (is_string($raw) && $raw !== '') ? @json_decode($raw, true) : null;
+        if (is_array($dec)) {
+            $candidates[] = $dec;
+        }
+    }
+
+    $sessKey = 'rl_' . $bucket;
+    if (!empty($_SESSION[$sessKey]) && is_array($_SESSION[$sessKey])) {
+        $candidates[] = $_SESSION[$sessKey];
+    }
+
+    return select_active_rate_limit($candidates, $maxAttempts, $now);
 }
 
 /**
@@ -150,32 +219,71 @@ function check_rate_limit(string $bucket, int $maxAttempts = 5, int $lockoutSeco
  * Mengembalikan sisa detik tunggu jika batas percobaan telah tercapai (0 jika belum terkunci).
  */
 function record_failed_attempt(string $bucket, int $lockoutSeconds = 5, int $maxAttempts = 5): int {
-    $now  = time();
-    $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
-    $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
+    $now     = time();
+    $file    = rate_limit_file_path($bucket);
+    $sessKey = 'rl_' . $bucket;
+    $data    = ['count' => 0, 'expires' => 0, 'window_expires' => 0];
+    $updated = false;
 
-    $data = get_rate_limit_data($bucket, $maxAttempts, $now);
-    $data['count']++;
-    $data['window_expires'] = $now + max(60, $lockoutSeconds);
-    $data['expires']        = $now + $lockoutSeconds;
+    $fp = @fopen($file, 'c+b');
+    if ($fp !== false) {
+        if (@flock($fp, LOCK_EX)) {
+            rewind($fp);
+            $raw        = stream_get_contents($fp);
+            $candidates = [];
 
-    @file_put_contents($file, json_encode($data), LOCK_EX);
-    $_SESSION['rl_' . $bucket] = $data;
+            $dec = (is_string($raw) && $raw !== '') ? @json_decode($raw, true) : null;
+            if (is_array($dec)) {
+                $candidates[] = $dec;
+            }
+            if (!empty($_SESSION[$sessKey]) && is_array($_SESSION[$sessKey])) {
+                $candidates[] = $_SESSION[$sessKey];
+            }
 
-    if ($data['count'] >= $maxAttempts) {
-        return $lockoutSeconds;
+            $data                   = select_active_rate_limit($candidates, $maxAttempts, $now);
+            $data['count']++;
+            $data['window_expires'] = $now + max(60, $lockoutSeconds);
+            $data['expires']        = $now + $lockoutSeconds;
+
+            ftruncate($fp, 0);
+            rewind($fp);
+            fwrite($fp, json_encode($data));
+            fflush($fp);
+            @flock($fp, LOCK_UN);
+            $updated = true;
+        }
+        fclose($fp);
     }
-    return 0;
+
+    if (!$updated) {
+        $data                   = select_active_rate_limit([$_SESSION[$sessKey] ?? null], $maxAttempts, $now);
+        $data['count']++;
+        $data['window_expires'] = $now + max(60, $lockoutSeconds);
+        $data['expires']        = $now + $lockoutSeconds;
+    }
+
+    $_SESSION[$sessKey] = $data;
+
+    return ($data['count'] >= $maxAttempts) ? $lockoutSeconds : 0;
 }
 
 /**
  * Mereset catatan percobaan gagal setelah kode / autentikasi berhasil
  */
 function clear_rate_limit(string $bucket): void {
-    $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
-    $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
+    $file = rate_limit_file_path($bucket);
     if (is_file($file)) {
-        @file_put_contents($file, json_encode(['count' => 0, 'expires' => 0, 'window_expires' => 0]), LOCK_EX);
+        $fp = @fopen($file, 'r+b');
+        if ($fp !== false) {
+            if (@flock($fp, LOCK_EX)) {
+                ftruncate($fp, 0);
+                rewind($fp);
+                fwrite($fp, json_encode(['count' => 0, 'expires' => 0, 'window_expires' => 0]));
+                fflush($fp);
+                @flock($fp, LOCK_UN);
+            }
+            fclose($fp);
+        }
         @unlink($file);
     }
     unset($_SESSION['rl_' . $bucket]);
@@ -224,10 +332,18 @@ try {
     ]);
 } catch (PDOException $ex) {
     error_log('Database connection error: ' . $ex->getMessage());
+    $errCode = (int)($ex->errorInfo[1] ?? $ex->getCode());
+    if ($errCode === 1049 && file_exists($lockFile)) {
+        @unlink($lockFile);
+    }
     if (!file_exists($lockFile)) {
-        $inAdmin = (basename(dirname($_SERVER['SCRIPT_NAME'] ?? '')) === 'admin');
-        header('Location: ' . ($inAdmin ? '../install.php' : 'install.php'));
-        exit;
+        if (is_ajax_or_status_request()) {
+            send_json_error(503, ['error' => 'uninstalled']);
+        }
+        redirect_to_installer();
+    }
+    if (is_ajax_or_status_request()) {
+        send_json_error(503, ['error' => 'database_error']);
     }
     http_response_code(500);
     die('Gagal terhubung ke database. Periksa layanan MySQL/MariaDB dan konfigurasi di config/config.php.');
@@ -249,6 +365,11 @@ function get_pengaturan(PDO $pdo): array {
     try {
         $stmt = $pdo->query('SELECT * FROM pengaturan WHERE id = 1 LIMIT 1');
         $row  = $stmt->fetch();
+        if (!$row) {
+            $pdo->exec("INSERT IGNORE INTO pengaturan (id, nama_sekolah, periode, status_voting, tampilkan_hasil, tema) VALUES (1, 'SMA Negeri 1', '2026/2027', 'buka', 0, 'light')");
+            $stmt = $pdo->query('SELECT * FROM pengaturan WHERE id = 1 LIMIT 1');
+            $row  = $stmt->fetch();
+        }
         if ($row) {
             if (!array_key_exists('tema', $row)) {
                 $pdo->exec("ALTER TABLE pengaturan ADD COLUMN tema ENUM('light','dark') NOT NULL DEFAULT 'light'");
@@ -258,9 +379,11 @@ function get_pengaturan(PDO $pdo): array {
         }
     } catch (PDOException $e) {
         error_log('Pengaturan query error: ' . $e->getMessage());
-        $inAdmin = (basename(dirname($_SERVER['SCRIPT_NAME'] ?? '')) === 'admin');
-        header('Location: ' . ($inAdmin ? '../install.php' : 'install.php'));
-        exit;
+        @unlink(dirname(__DIR__) . '/installed.lock');
+        if (is_ajax_or_status_request()) {
+            send_json_error(503, ['error' => 'uninstalled']);
+        }
+        redirect_to_installer();
     }
 
     return $defaults;
@@ -299,7 +422,9 @@ function resolve_candidate_photo_url(?string $filename, string $prefix = '../'):
     if (!is_file($uploadDir . $foto)) {
         $foto = 'default-candidate.png';
     }
-    return $prefix . 'assets/uploads/' . $foto;
+    $fullPath = $uploadDir . $foto;
+    $mtime    = is_file($fullPath) ? (int)@filemtime($fullPath) : 0;
+    return $prefix . 'assets/uploads/' . $foto . ($mtime > 0 ? '?v=' . $mtime : '');
 }
 
 /**

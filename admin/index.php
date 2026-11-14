@@ -25,7 +25,13 @@ $sigParts           = [(int)$pengaturan['tampilkan_hasil']];
 
 foreach ($kandidatList as $k) {
     $totalSuaraKandidat += (int)$k['jumlah_suara'];
-    $sigParts[] = $k['id'] . ':' . $k['no_urut'] . ':' . $k['nama_ketua'] . ':' . ($k['nama_wakil'] ?? '') . ':' . ($k['nama_file_foto'] ?? '');
+    $fotoFile  = !empty($k['nama_file_foto']) ? basename($k['nama_file_foto']) : 'default-candidate.png';
+    $fotoPath  = dirname(__DIR__) . '/assets/uploads/' . $fotoFile;
+    if (!is_file($fotoPath)) {
+        $fotoPath = dirname(__DIR__) . '/assets/uploads/default-candidate.png';
+    }
+    $fotoMtime  = (int)@filemtime($fotoPath);
+    $sigParts[] = $k['id'] . ':' . $k['no_urut'] . ':' . $k['nama_ketua'] . ':' . ($k['nama_wakil'] ?? '') . ':' . ($k['nama_file_foto'] ?? '') . ':' . $fotoMtime;
 }
 $chartSig = md5(implode('|', $sigParts));
 
@@ -108,22 +114,19 @@ function detect_lan_ips(): array {
         }
     }
 
-    // 3. Jika diakses menggunakan IP lokal dari browser, pastikan IP tersebut masuk daftar utama
-    $srvAddr = $_SERVER['SERVER_ADDR'] ?? '';
-    if (
-        filter_var($srvAddr, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) &&
-        $srvAddr !== '127.0.0.1' &&
-        !in_array($srvAddr, $ips, true)
-    ) {
-        array_unshift($ips, $srvAddr);
-    }
-
     // Prioritaskan IP Wi-Fi/Hotspot dibanding adapter virtual (VirtualBox 192.168.56.1)
     usort($ips, function ($a, $b) {
         $aVirt = ($a === '192.168.56.1') ? 1 : 0;
         $bVirt = ($b === '192.168.56.1') ? 1 : 0;
         return $aVirt <=> $bVirt;
     });
+
+    // 3. Jika diakses menggunakan IP lokal dari browser, pastikan IP tersebut selalu menjadi prioritas utama
+    $srvAddr = $_SERVER['SERVER_ADDR'] ?? '';
+    if (filter_var($srvAddr, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) && strpos($srvAddr, '127.') !== 0) {
+        $ips = array_values(array_diff($ips, [$srvAddr]));
+        array_unshift($ips, $srvAddr);
+    }
 
     if (empty($ips)) {
         $ips[] = '127.0.0.1';
@@ -173,7 +176,10 @@ $adminLanUrl = $scheme . '://' . $primaryIp . $portPart . $basePath . '/admin/';
         <div class="sidebar-user">Login: <strong><?= e($_SESSION['admin_nama'] ?? 'Admin') ?></strong></div>
         <div class="sidebar-actions">
           <a href="../index.php" class="btn btn-sm">Bilik Suara</a>
-          <a href="logout.php" class="btn btn-sm btn-danger">Keluar</a>
+          <form method="post" action="logout.php" style="display: contents;">
+            <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+            <button type="submit" class="btn btn-sm btn-danger">Keluar</button>
+          </form>
         </div>
       </div>
     </aside>
@@ -185,7 +191,6 @@ $adminLanUrl = $scheme . '://' . $primaryIp . $portPart . $basePath . '/admin/';
           <p>Periode <?= e($pengaturan['periode']) ?> &mdash; Pantauan suara dan distribusi token jaringan lokal</p>
         </div>
         <div class="filter-bar">
-          </span>
           <a href="index.php" class="btn btn-sm">Muat Ulang Data</a>
           <a href="token.php" class="btn btn-sm btn-primary">+ Buat Token</a>
         </div>

@@ -37,10 +37,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 clear_rate_limit('admin_reauth');
                 clear_rate_limit('install_unlock');
                 session_regenerate_id(true);
-                $_SESSION['csrf_token']     = bin2hex(random_bytes(32));
-                $_SESSION['admin_id']       = (int)$admin['id'];
-                $_SESSION['admin_username'] = $admin['username'];
-                $_SESSION['admin_nama']     = $admin['nama_lengkap'];
+                $_SESSION['csrf_token']      = bin2hex(random_bytes(32));
+                $_SESSION['admin_id']        = (int)$admin['id'];
+                $_SESSION['admin_username']  = $admin['username'];
+                $_SESSION['admin_nama']      = $admin['nama_lengkap'];
+                $_SESSION['admin_pass_hash'] = $admin['password'];
                 header('Location: index.php');
                 exit;
             } else {

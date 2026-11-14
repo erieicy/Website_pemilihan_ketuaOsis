@@ -73,6 +73,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $hash = password_hash($passBaru, PASSWORD_BCRYPT);
                             $stmtUpd = $pdo->prepare('UPDATE admin SET nama_lengkap = ?, username = ?, password = ? WHERE id = ?');
                             $stmtUpd->execute([$namaLengkap, $usernameBaru, $hash, (int)$adminRow['id']]);
+                            $_SESSION['admin_pass_hash'] = $hash;
                         } else {
                             $stmtUpd = $pdo->prepare('UPDATE admin SET nama_lengkap = ?, username = ? WHERE id = ?');
                             $stmtUpd->execute([$namaLengkap, $usernameBaru, (int)$adminRow['id']]);
@@ -199,7 +200,10 @@ $waitSec    = check_rate_limit('admin_reauth', 5, 30);
         <div class="sidebar-user">Login: <strong><?= e($_SESSION['admin_nama'] ?? 'Admin') ?></strong></div>
         <div class="sidebar-actions">
           <a href="../index.php" class="btn btn-sm">Bilik Suara</a>
-          <a href="logout.php" class="btn btn-sm btn-danger">Keluar</a>
+          <form method="post" action="logout.php" style="display: contents;">
+            <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+            <button type="submit" class="btn btn-sm btn-danger">Keluar</button>
+          </form>
         </div>
       </div>
     </aside>
@@ -310,17 +314,20 @@ $waitSec    = check_rate_limit('admin_reauth', 5, 30);
                     type="password"
                     id="password_install"
                     name="password_install"
-                    class="form-control"
+                    class="form-control js-reauth-control"
                     placeholder="Masukkan password Administrator"
+                    <?= $waitSec > 0 ? 'disabled' : '' ?>
                     required
                   >
                 </div>
                 <button
                   type="submit"
-                  class="btn btn-danger btn-block js-confirm"
+                  class="btn btn-danger btn-block js-confirm js-reauth-control js-reauth-submit"
+                  data-label="Reset Total &amp; Buka Halaman install.php"
                   data-confirm="PERINGATAN KERAS: Seluruh data (kandidat, foto, token, akun admin, dan pengaturan) akan dihapus total dari awal dan diarahkan ke install.php. Lanjutkan?"
+                  <?= $waitSec > 0 ? 'disabled' : '' ?>
                 >
-                  Reset Total &amp; Buka Halaman install.php
+                  <?= $waitSec > 0 ? 'Tunggu ' . (int)$waitSec . ' Detik...' : 'Reset Total &amp; Buka Halaman install.php' ?>
                 </button>
               </form>
             </div>
@@ -381,13 +388,21 @@ $waitSec    = check_rate_limit('admin_reauth', 5, 30);
                     type="password"
                     id="password_lama"
                     name="password_lama"
-                    class="form-control"
+                    class="form-control js-reauth-control"
                     placeholder="Wajib diisi untuk menyimpan perubahan akun"
+                    <?= $waitSec > 0 ? 'disabled' : '' ?>
                     required
                   >
                 </div>
 
-                <button type="submit" class="btn btn-block">Perbarui Akun Admin</button>
+                <button
+                  type="submit"
+                  class="btn btn-block js-reauth-control js-reauth-submit"
+                  data-label="Perbarui Akun Admin"
+                  <?= $waitSec > 0 ? 'disabled' : '' ?>
+                >
+                  <?= $waitSec > 0 ? 'Tunggu ' . (int)$waitSec . ' Detik...' : 'Perbarui Akun Admin' ?>
+                </button>
               </form>
             </div>
           </div>
@@ -410,17 +425,20 @@ $waitSec    = check_rate_limit('admin_reauth', 5, 30);
                     type="password"
                     id="password_konfirmasi"
                     name="password_konfirmasi"
-                    class="form-control"
+                    class="form-control js-reauth-control"
                     placeholder="Password Administrator"
+                    <?= $waitSec > 0 ? 'disabled' : '' ?>
                     required
                   >
                 </div>
                 <button
                   type="submit"
-                  class="btn btn-danger btn-block js-confirm"
+                  class="btn btn-danger btn-block js-confirm js-reauth-control js-reauth-submit"
+                  data-label="Hapus Seluruh Token &amp; Reset Suara ke 0"
                   data-confirm="PERINGATAN: Seluruh token dan perolehan suara akan direset ke 0. Lanjutkan?"
+                  <?= $waitSec > 0 ? 'disabled' : '' ?>
                 >
-                  Hapus Seluruh Token &amp; Reset Suara ke 0
+                  <?= $waitSec > 0 ? 'Tunggu ' . (int)$waitSec . ' Detik...' : 'Hapus Seluruh Token &amp; Reset Suara ke 0' ?>
                 </button>
               </form>
             </div>
@@ -434,6 +452,9 @@ $waitSec    = check_rate_limit('admin_reauth', 5, 30);
     (function () {
       var rlCountdown = document.getElementById('rl-countdown');
       var rlAlert     = document.getElementById('rl-alert');
+      var reauthEls   = document.querySelectorAll('.js-reauth-control');
+      var reauthBtns  = document.querySelectorAll('.js-reauth-submit');
+
       if (!rlCountdown) return;
       var rem = parseInt(rlCountdown.getAttribute('data-wait') || rlCountdown.textContent, 10) || 0;
       if (rem <= 0) return;
@@ -443,8 +464,19 @@ $waitSec    = check_rate_limit('admin_reauth', 5, 30);
         if (rem <= 0) {
           clearInterval(rlTimer);
           if (rlAlert) rlAlert.style.display = 'none';
+          reauthEls.forEach(function (el) {
+            el.disabled = false;
+          });
+          reauthBtns.forEach(function (btn) {
+            if (btn.dataset && btn.dataset.label) {
+              btn.textContent = btn.dataset.label;
+            }
+          });
         } else {
           rlCountdown.textContent = String(rem);
+          reauthBtns.forEach(function (btn) {
+            btn.textContent = 'Tunggu ' + rem + ' Detik...';
+          });
         }
       }, 1000);
     })();

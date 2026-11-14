@@ -25,7 +25,13 @@ $stmtToken = $pdo->prepare('SELECT kode_token, sudah_dipakai FROM tokens WHERE k
 $stmtToken->execute([$kodeToken]);
 $tokenRow = $stmtToken->fetch();
 
-if (!$tokenRow || (int)$tokenRow['sudah_dipakai'] === 1) {
+if (!$tokenRow) {
+    unset($_SESSION['voter_token']);
+    $_SESSION['voter_error'] = 'Kode token tidak ditemukan atau telah dihapus oleh panitia.';
+    header('Location: index.php');
+    exit;
+}
+if ((int)$tokenRow['sudah_dipakai'] === 1) {
     unset($_SESSION['voter_token']);
     $_SESSION['voter_error'] = 'Kode ini sudah pernah digunakan dan tidak berlaku lagi!';
     header('Location: index.php');
@@ -38,6 +44,28 @@ unset($_SESSION['voter_error']);
 
 $stmtKandidat = $pdo->query('SELECT * FROM kandidat ORDER BY no_urut ASC, id ASC');
 $kandidatList = $stmtKandidat->fetchAll();
+
+$kSigParts = [];
+foreach ($kandidatList as $k) {
+    $fotoName = !empty($k['nama_file_foto']) ? basename((string)$k['nama_file_foto']) : 'default-candidate.png';
+    $fotoFile = __DIR__ . '/assets/uploads/' . $fotoName;
+    if (!is_file($fotoFile)) {
+        $fotoFile = __DIR__ . '/assets/uploads/default-candidate.png';
+    }
+    $fotoMtime = is_file($fotoFile) ? (int)@filemtime($fotoFile) : 0;
+
+    $kSigParts[] = implode(':', [
+        (int)$k['id'],
+        (int)$k['no_urut'],
+        (string)($k['nama_ketua'] ?? ''),
+        (string)($k['nama_wakil'] ?? ''),
+        (string)($k['nama_file_foto'] ?? ''),
+        $fotoMtime,
+        md5((string)($k['visi'] ?? '')),
+        md5((string)($k['misi'] ?? '')),
+    ]);
+}
+$kandidatSig = md5(implode('|', $kSigParts));
 ?>
 <!DOCTYPE html>
 <html lang="id" data-theme="<?= e($pengaturan['tema']) ?>">
@@ -48,7 +76,7 @@ $kandidatList = $stmtKandidat->fetchAll();
   <link rel="stylesheet" href="assets/css/base.css">
   <link rel="stylesheet" href="assets/css/bilik-suara.css">
 </head>
-<body>
+<body data-kandidat-sig="<?= e($kandidatSig) ?>">
   <header class="booth-topbar">
     <div class="booth-brand">
       <?= e($pengaturan['nama_sekolah']) ?> &mdash; <span class="text-muted">Periode <?= e($pengaturan['periode']) ?></span>
@@ -83,12 +111,8 @@ $kandidatList = $stmtKandidat->fetchAll();
       <div class="candidate-grid">
         <?php foreach ($kandidatList as $k): ?>
           <?php
-            $noUrutPad = str_pad((string)$k['no_urut'], 2, '0', STR_PAD_LEFT);
-            $fotoName  = !empty($k['nama_file_foto']) ? basename($k['nama_file_foto']) : 'default-candidate.png';
-            $fotoPath  = 'assets/uploads/' . $fotoName;
-            if (!file_exists(__DIR__ . '/' . $fotoPath)) {
-                $fotoPath = 'assets/uploads/default-candidate.png';
-            }
+            $noUrutPad  = str_pad((string)$k['no_urut'], 2, '0', STR_PAD_LEFT);
+            $fotoPath   = resolve_candidate_photo_url($k['nama_file_foto'] ?? null, '');
             $namaPaslon = $k['nama_ketua'] . (!empty($k['nama_wakil']) ? ' & ' . $k['nama_wakil'] : '');
           ?>
           <article class="candidate-card">

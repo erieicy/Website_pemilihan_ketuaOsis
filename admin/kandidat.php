@@ -29,6 +29,19 @@ function sanitize_filename_slug(string $raw): string {
 }
 
 /**
+ * Menyusun slug nama file otomatis dari nomor urut dan nama ketua
+ */
+function build_candidate_auto_slug(int $noUrut, string $namaKetua): string {
+    $noPad     = str_pad((string)$noUrut, 2, '0', STR_PAD_LEFT);
+    $ketuaSlug = sanitize_filename_slug($namaKetua);
+    $slug      = $ketuaSlug !== '' ? ('paslon-' . $noPad . '-' . $ketuaSlug) : ('paslon-' . $noPad);
+    if ($slug === '' || $slug === 'default-candidate' || $slug === 'paslon-' . $noPad . '-') {
+        return 'paslon-' . $noPad;
+    }
+    return $slug;
+}
+
+/**
  * Menghapus file foto lama secara aman (kecuali default-candidate.png, .gitkeep, .htaccess)
  */
 function delete_old_photo(string $uploadDir, ?string $filename): void {
@@ -61,10 +74,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'delet
         $rowOld = $stmtOld->fetch();
 
         if ($rowOld) {
-            delete_old_photo($uploadDir, $rowOld['nama_file_foto']);
-            $stmtDel = $pdo->prepare('DELETE FROM kandidat WHERE id = ?');
-            $stmtDel->execute([$idHapus]);
-            $_SESSION['flash_kandidat_msg'] = 'Data kandidat "' . $rowOld['nama_ketua'] . '" beserta file fotonya berhasil dihapus.';
+            if ((int)$rowOld['jumlah_suara'] > 0) {
+                $_SESSION['flash_kandidat_err'] = 'Kandidat "' . $rowOld['nama_ketua'] . '" tidak dapat dihapus karena sudah memiliki ' . (int)$rowOld['jumlah_suara'] . ' suara sah. Gunakan Reset Data Simulasi di menu Pengaturan jika ingin mengulang pemilihan.';
+            } else {
+                delete_old_photo($uploadDir, $rowOld['nama_file_foto']);
+                $stmtDel = $pdo->prepare('DELETE FROM kandidat WHERE id = ?');
+                $stmtDel->execute([$idHapus]);
+                $_SESSION['flash_kandidat_msg'] = 'Data kandidat "' . $rowOld['nama_ketua'] . '" beserta file fotonya berhasil dihapus.';
+            }
         }
     }
     header('Location: kandidat.php');
@@ -98,6 +115,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save'
     } elseif (mb_strlen($namaKetua) > 100 || mb_strlen($namaWakil) > 100 || mb_strlen($namaCustom) > 100) {
         // Cegah silent truncation / HTTP 500 (BUG-FUN-05)
         $error = 'Nama Calon Ketua, Wakil, dan Nama File Kustom maksimal 100 karakter.';
+    } elseif (mb_strlen($visi) > 10000 || mb_strlen($misi) > 10000) {
+        $error = 'Visi dan Misi masing-masing maksimal 10.000 karakter.';
     } else {
         // Pastikan Nomor Urut Kandidat Unik (BUG-FUN-03)
         $stmtDup = $pdo->prepare('SELECT id FROM kandidat WHERE no_urut = ? AND id != ? LIMIT 1');
@@ -108,10 +127,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save'
     }
 
     if ($error === '') {
-        $finalFileName = $existing ? $existing['nama_file_foto'] : 'default-candidate.png';
+        $finalFileName   = $existing ? $existing['nama_file_foto'] : 'default-candidate.png';
+        $uploadedNewFile = null;
+        $renamedFromFile = null;
+        $renamedToFile   = null;
 
         // Tentukan basis nama file (dari input custom atau auto-generate no_urut + nama_ketua)
-        $defaultSlug = 'paslon-' . str_pad((string)$noUrut, 2, '0', STR_PAD_LEFT) . '-' . sanitize_filename_slug($namaKetua);
+        $defaultSlug = build_candidate_auto_slug($noUrut, $namaKetua);
         $baseSlug    = $namaCustom !== '' ? sanitize_filename_slug($namaCustom) : $defaultSlug;
         // Cegah penamaan yang menimpa default-candidate.png (BUG-FUN-04)
         if ($baseSlug === '' || $baseSlug === 'default-candidate') {
@@ -123,7 +145,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save'
             $file = $_FILES['foto'];
 
             if ($file['error'] !== UPLOAD_ERR_OK) {
-                $error = 'Terjadi kesalahan saat mengunggah file foto.';
+                if (in_array($file['error'], [UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE], true)) {
+                    $error = 'Ukuran file foto melebihi batas maksimal 2 MB.';
+                } else {
+                    $error = 'Terjadi kesalahan saat mengunggah file foto.';
+                }
             } elseif ($file['size'] > 2 * 1024 * 1024) {
                 $error = 'Ukuran file foto melebihi batas maksimal 2 MB.';
             } else {
@@ -158,15 +184,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save'
                     if (!move_uploaded_file($file['tmp_name'], $uploadDir . $targetName)) {
                         $error = 'Gagal menyimpan file foto ke folder assets/uploads/.';
                     } else {
-                        if ($existing && $existing['nama_file_foto'] !== $targetName) {
-                            delete_old_photo($uploadDir, $existing['nama_file_foto']);
-                        }
-                        $finalFileName = $targetName;
+                        $uploadedNewFile = $targetName;
+                        $finalFileName   = $targetName;
                     }
                 }
             }
-        } elseif ($existing && $namaCustom !== '' && $existing['nama_file_foto'] !== 'default-candidate.png') {
-            // Jika mode edit tanpa upload foto baru, tapi mengganti nama file kustom
+        } elseif ($existing && $existing['nama_file_foto'] !== 'default-candidate.png') {
+            // Jika mode edit tanpa upload foto baru, perbarui nama file foto mengikuti nama kustom atau slug otomatis
             $currentFile = basename($existing['nama_file_foto']);
             $currentExt  = strtolower(pathinfo($currentFile, PATHINFO_EXTENSION));
             $newTarget   = $baseSlug . '.' . $currentExt;
@@ -175,30 +199,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save'
                     $newTarget = $baseSlug . '-' . substr(bin2hex(random_bytes(2)), 0, 4) . '.' . $currentExt;
                 }
                 if (@rename($uploadDir . $currentFile, $uploadDir . $newTarget)) {
-                    $finalFileName = $newTarget;
+                    $renamedFromFile = $currentFile;
+                    $renamedToFile   = $newTarget;
+                    $finalFileName   = $newTarget;
                 }
             }
         }
 
         if ($error === '') {
-            if ($idEdit > 0 && $existing) {
-                $stmtUpd = $pdo->prepare('
-                    UPDATE kandidat
-                    SET no_urut = ?, nama_ketua = ?, nama_wakil = ?, nama_file_foto = ?, visi = ?, misi = ?
-                    WHERE id = ?
-                ');
-                $stmtUpd->execute([$noUrut, $namaKetua, $namaWakil, $finalFileName, $visi, $misi, $idEdit]);
-                $_SESSION['flash_kandidat_msg'] = 'Data kandidat berhasil diperbarui.';
-            } else {
-                $stmtIns = $pdo->prepare('
-                    INSERT INTO kandidat (no_urut, nama_ketua, nama_wakil, nama_file_foto, visi, misi, jumlah_suara)
-                    VALUES (?, ?, ?, ?, ?, ?, 0)
-                ');
-                $stmtIns->execute([$noUrut, $namaKetua, $namaWakil, $finalFileName, $visi, $misi]);
-                $_SESSION['flash_kandidat_msg'] = 'Kandidat baru berhasil ditambahkan.';
+            try {
+                if ($idEdit > 0 && $existing) {
+                    $stmtUpd = $pdo->prepare('
+                        UPDATE kandidat
+                        SET no_urut = ?, nama_ketua = ?, nama_wakil = ?, nama_file_foto = ?, visi = ?, misi = ?
+                        WHERE id = ?
+                    ');
+                    $stmtUpd->execute([$noUrut, $namaKetua, $namaWakil, $finalFileName, $visi, $misi, $idEdit]);
+                    if ($uploadedNewFile !== null && $existing['nama_file_foto'] !== $uploadedNewFile) {
+                        delete_old_photo($uploadDir, $existing['nama_file_foto']);
+                    }
+                    $_SESSION['flash_kandidat_msg'] = 'Data kandidat berhasil diperbarui.';
+                } else {
+                    $stmtIns = $pdo->prepare('
+                        INSERT INTO kandidat (no_urut, nama_ketua, nama_wakil, nama_file_foto, visi, misi, jumlah_suara)
+                        VALUES (?, ?, ?, ?, ?, ?, 0)
+                    ');
+                    $stmtIns->execute([$noUrut, $namaKetua, $namaWakil, $finalFileName, $visi, $misi]);
+                    $_SESSION['flash_kandidat_msg'] = 'Kandidat baru berhasil ditambahkan.';
+                }
+                header('Location: kandidat.php');
+                exit;
+            } catch (PDOException $e) {
+                error_log('Kandidat save error: ' . $e->getMessage());
+                if ($uploadedNewFile !== null && (!$existing || $existing['nama_file_foto'] !== $uploadedNewFile)) {
+                    delete_old_photo($uploadDir, $uploadedNewFile);
+                }
+                if ($renamedFromFile !== null && $renamedToFile !== null && is_file($uploadDir . $renamedToFile)) {
+                    @rename($uploadDir . $renamedToFile, $uploadDir . $renamedFromFile);
+                }
+                $error = ((string)$e->getCode() === '23000')
+                    ? "Nomor urut {$noUrut} sudah digunakan oleh kandidat lain. Gunakan nomor urut yang berbeda."
+                    : 'Gagal menyimpan data kandidat ke database. Silakan coba lagi.';
             }
-            header('Location: kandidat.php');
-            exit;
         }
     }
 
@@ -243,17 +285,18 @@ foreach ($kandidatList as $item) {
     }
 }
 
-$previewFotoUrl = '../assets/uploads/default-candidate.png';
+$previewFotoUrl = resolve_candidate_photo_url($editData['nama_file_foto'] ?? null, '../');
 $customNameVal  = '';
 if ($editData) {
-    $f = basename($editData['nama_file_foto']);
-    if (is_file($uploadDir . $f)) {
-        $previewFotoUrl = '../assets/uploads/' . $f;
-    }
+    $f = !empty($editData['nama_file_foto']) ? basename($editData['nama_file_foto']) : 'default-candidate.png';
     if ($failedCustomName !== null) {
         $customNameVal = $failedCustomName;
     } elseif ($f !== 'default-candidate.png') {
-        $customNameVal = pathinfo($f, PATHINFO_FILENAME);
+        $autoSlug    = build_candidate_auto_slug((int)$editData['no_urut'], (string)$editData['nama_ketua']);
+        $currentBase = pathinfo($f, PATHINFO_FILENAME);
+        if ($currentBase !== $autoSlug) {
+            $customNameVal = $currentBase;
+        }
     }
 }
 ?>
@@ -286,7 +329,10 @@ if ($editData) {
         <div class="sidebar-user">Login: <strong><?= e($_SESSION['admin_nama'] ?? 'Admin') ?></strong></div>
         <div class="sidebar-actions">
           <a href="../index.php" class="btn btn-sm">Bilik Suara</a>
-          <a href="logout.php" class="btn btn-sm btn-danger">Keluar</a>
+          <form method="post" action="logout.php" style="display: contents;">
+            <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+            <button type="submit" class="btn btn-sm btn-danger">Keluar</button>
+          </form>
         </div>
       </div>
     </aside>
@@ -469,11 +515,8 @@ if ($editData) {
                 <?php else: ?>
                   <?php foreach ($kandidatList as $k): ?>
                     <?php
-                      $fName = !empty($k['nama_file_foto']) ? basename($k['nama_file_foto']) : 'default-candidate.png';
-                      $fUrl  = '../assets/uploads/' . $fName;
-                      if (!is_file($uploadDir . $fName)) {
-                          $fUrl = '../assets/uploads/default-candidate.png';
-                      }
+                      $fName    = !empty($k['nama_file_foto']) ? basename($k['nama_file_foto']) : 'default-candidate.png';
+                      $fUrl     = resolve_candidate_photo_url($k['nama_file_foto'] ?? null, '../');
                       $hasVotes = ((int)$k['jumlah_suara'] > 0);
                     ?>
                     <tr>
@@ -497,23 +540,29 @@ if ($editData) {
                       <td>
                         <div style="display: flex; gap: 6px; align-items: center;">
                           <a href="kandidat.php?edit=<?= (int)$k['id'] ?>" class="btn btn-sm">Edit</a>
-                          <?php
-                            $confirmMsg = $hasVotes
-                                ? 'Kandidat ' . $k['nama_ketua'] . ' sudah memiliki ' . (int)$k['jumlah_suara'] . ' suara. Yakin ingin menghapus kandidat ini beserta file fotonya?'
-                                : 'Hapus kandidat ' . $k['nama_ketua'] . ' beserta file fotonya?';
-                          ?>
-                          <form method="post" action="kandidat.php" style="display: inline;">
-                            <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
-                            <input type="hidden" name="action" value="delete">
-                            <input type="hidden" name="id" value="<?= (int)$k['id'] ?>">
+                          <?php if ($hasVotes): ?>
                             <button
-                              type="submit"
-                              class="btn btn-sm btn-danger js-confirm"
-                              data-confirm="<?= e($confirmMsg) ?>"
+                              type="button"
+                              class="btn btn-sm btn-danger"
+                              disabled
+                              title="Tidak dapat dihapus karena sudah memiliki suara sah"
                             >
                               Hapus
                             </button>
-                          </form>
+                          <?php else: ?>
+                            <form method="post" action="kandidat.php" style="display: inline;">
+                              <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+                              <input type="hidden" name="action" value="delete">
+                              <input type="hidden" name="id" value="<?= (int)$k['id'] ?>">
+                              <button
+                                type="submit"
+                                class="btn btn-sm btn-danger js-confirm"
+                                data-confirm="<?= e('Hapus kandidat ' . $k['nama_ketua'] . ' beserta file fotonya?') ?>"
+                              >
+                                Hapus
+                              </button>
+                            </form>
+                          <?php endif; ?>
                         </div>
                       </td>
                     </tr>

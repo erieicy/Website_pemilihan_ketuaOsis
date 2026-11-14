@@ -41,7 +41,13 @@ $totalSuaraSah = 0;
 $sigParts      = [$isUnlocked ? '1' : '0'];
 foreach ($kandidatList as $k) {
     $totalSuaraSah += (int)$k['jumlah_suara'];
-    $sigParts[]     = $k['id'] . ':' . $k['no_urut'] . ':' . $k['nama_ketua'] . ':' . ($k['nama_wakil'] ?? '') . ':' . ($k['nama_file_foto'] ?? '');
+    $fotoFile  = !empty($k['nama_file_foto']) ? basename($k['nama_file_foto']) : 'default-candidate.png';
+    $fotoPath  = dirname(__DIR__) . '/assets/uploads/' . $fotoFile;
+    if (!is_file($fotoPath)) {
+        $fotoPath = dirname(__DIR__) . '/assets/uploads/default-candidate.png';
+    }
+    $fotoMtime  = (int)@filemtime($fotoPath);
+    $sigParts[] = $k['id'] . ':' . $k['no_urut'] . ':' . $k['nama_ketua'] . ':' . ($k['nama_wakil'] ?? '') . ':' . ($k['nama_file_foto'] ?? '') . ':' . $fotoMtime;
 }
 $structSig  = md5(implode('|', $sigParts));
 $activeCsrf = csrf_token();
@@ -203,7 +209,10 @@ if (isset($_GET['ajax'])) {
         <div class="sidebar-user">Login: <strong><?= e($_SESSION['admin_nama'] ?? 'Admin') ?></strong></div>
         <div class="sidebar-actions">
           <a href="../index.php" class="btn btn-sm">Bilik Suara</a>
-          <a href="logout.php" class="btn btn-sm btn-danger">Keluar</a>
+          <form method="post" action="logout.php" style="display: contents;">
+            <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+            <button type="submit" class="btn btn-sm btn-danger">Keluar</button>
+          </form>
         </div>
       </div>
     </aside>

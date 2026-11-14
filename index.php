@@ -22,15 +22,53 @@ $isOpen     = ($pengaturan['status_voting'] === 'buka');
 
 // Endpoint ringan status bilik suara agar layar pemilih otomatis sinkron saat voting dibuka/ditutup
 if (isset($_GET['status_check'])) {
+    $voterToken = !empty($_SESSION['voter_token']) ? (string)$_SESSION['voter_token'] : '';
     session_write_close();
+
+    $tokenValid = false;
+    if ($voterToken !== '') {
+        $stmtTok = $pdo->prepare('SELECT sudah_dipakai FROM tokens WHERE kode_token = ? LIMIT 1');
+        $stmtTok->execute([$voterToken]);
+        $tRow       = $stmtTok->fetch();
+        $tokenValid = (bool)($tRow && (int)$tRow['sudah_dipakai'] === 0);
+    }
+
+    $stmtKandidat = $pdo->query('SELECT id, no_urut, nama_ketua, nama_wakil, nama_file_foto, visi, misi FROM kandidat ORDER BY no_urut ASC, id ASC');
+    $kandidatList = $stmtKandidat->fetchAll();
+    $kSigParts    = [];
+    foreach ($kandidatList as $k) {
+        $fotoName = !empty($k['nama_file_foto']) ? basename((string)$k['nama_file_foto']) : 'default-candidate.png';
+        $fotoFile = __DIR__ . '/assets/uploads/' . $fotoName;
+        if (!is_file($fotoFile)) {
+            $fotoFile = __DIR__ . '/assets/uploads/default-candidate.png';
+        }
+        $fotoMtime = is_file($fotoFile) ? (int)@filemtime($fotoFile) : 0;
+
+        $kSigParts[] = implode(':', [
+            (int)$k['id'],
+            (int)$k['no_urut'],
+            (string)($k['nama_ketua'] ?? ''),
+            (string)($k['nama_wakil'] ?? ''),
+            (string)($k['nama_file_foto'] ?? ''),
+            $fotoMtime,
+            md5((string)($k['visi'] ?? '')),
+            md5((string)($k['misi'] ?? '')),
+        ]);
+    }
+    $kandidatSig = md5(implode('|', $kSigParts));
+
     header('Content-Type: application/json; charset=utf-8');
     header('Cache-Control: no-store, no-cache, must-revalidate');
     echo json_encode([
         'status_voting' => $pengaturan['status_voting'],
         'tema'          => $pengaturan['tema'],
+        'token_valid'   => $tokenValid,
+        'kandidat_sig'  => $kandidatSig,
     ]);
     exit;
 }
+
+unset($_SESSION['vote_recorded_at']);
 
 // Jika pemilih sudah memiliki sesi token aktif yang belum dipakai, arahkan ke bilik suara
 if ($isOpen && !empty($_SESSION['voter_token'])) {

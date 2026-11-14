@@ -94,7 +94,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     // Redirect (Post/Redirect/Get) agar saat halaman di-refresh (F5) tidak menambah token otomatis
-    header('Location: token.php');
+    $redirectUrl = 'token.php';
+    if (isset($_POST['return_status']) || isset($_POST['return_q']) || isset($_POST['return_page'])) {
+        $retStatus = $_POST['return_status'] ?? 'all';
+        if (!in_array($retStatus, ['all', '0', '1'], true)) {
+            $retStatus = 'all';
+        }
+        $retQ    = strtoupper(trim((string)($_POST['return_q'] ?? '')));
+        $retPage = max(1, (int)($_POST['return_page'] ?? 1));
+        $redirectUrl .= '?' . http_build_query([
+            'status' => $retStatus,
+            'q'      => $retQ,
+            'page'   => $retPage,
+        ]);
+    }
+    header('Location: ' . $redirectUrl);
     exit;
 }
 
@@ -151,9 +165,25 @@ foreach ($tokenList as $t) {
 $tokenSig = md5(json_encode([$countAll, $countBelum, $countSudah, $totalFiltered, $currentPage, $statusFilter, $searchQuery, $rowSigs]));
 
 /**
+ * Merender input tersembunyi untuk mempertahankan filter dan halaman setelah aksi POST
+ */
+function render_token_return_inputs(string $statusFilter, string $searchQuery, int $currentPage): string {
+    return '<input type="hidden" name="return_status" value="' . e($statusFilter) . '">' .
+           '<input type="hidden" name="return_q" value="' . e($searchQuery) . '">' .
+           '<input type="hidden" name="return_page" value="' . (int)$currentPage . '">';
+}
+
+/**
  * Merender baris-baris <tr> tabel token
  */
-function render_token_rows(array $tokenList, int $offset, string $csrfToken): string {
+function render_token_rows(
+    array $tokenList,
+    int $offset,
+    string $csrfToken,
+    string $statusFilter = 'all',
+    string $searchQuery = '',
+    int $currentPage = 1
+): string {
     ob_start();
     if (empty($tokenList)): ?>
       <tr>
@@ -185,6 +215,7 @@ function render_token_rows(array $tokenList, int $offset, string $csrfToken): st
                 <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                 <input type="hidden" name="action" value="delete_one">
                 <input type="hidden" name="id" value="<?= (int)$t['id'] ?>">
+                <?= render_token_return_inputs($statusFilter, $searchQuery, $currentPage) ?>
                 <button
                   type="submit"
                   class="btn btn-sm js-confirm"
@@ -237,6 +268,7 @@ function render_token_footer(
         <form method="post" action="token.php">
           <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
           <input type="hidden" name="action" value="delete_unused">
+          <?= render_token_return_inputs($statusFilter, $searchQuery, $currentPage) ?>
           <button
             type="submit"
             class="btn btn-sm btn-danger js-confirm"
@@ -262,17 +294,23 @@ if (isset($_GET['ajax'])) {
     header('Cache-Control: no-store, no-cache, must-revalidate');
 
     if ($clientSig !== '' && $clientSig === $tokenSig) {
-        echo json_encode(['changed' => false, 'sig' => $tokenSig]);
+        echo json_encode([
+            'changed' => false,
+            'sig'     => $tokenSig,
+            'tema'    => $pengaturan['tema'],
+        ]);
         exit;
     }
 
     echo json_encode([
         'changed'         => true,
         'sig'             => $tokenSig,
+        'tema'            => $pengaturan['tema'],
+        'current_page'    => $currentPage,
         'count_all_fmt'   => number_format($countAll, 0, ',', '.'),
         'count_belum_fmt' => number_format($countBelum, 0, ',', '.'),
         'count_sudah_fmt' => number_format($countSudah, 0, ',', '.'),
-        'rows_html'       => render_token_rows($tokenList, $offset, $activeCsrf),
+        'rows_html'       => render_token_rows($tokenList, $offset, $activeCsrf, $statusFilter, $searchQuery, $currentPage),
         'footer_html'     => render_token_footer($currentPage, $totalPages, $countBelum, $statusFilter, $searchQuery, $activeCsrf),
     ]);
     exit;
@@ -307,7 +345,10 @@ if (isset($_GET['ajax'])) {
         <div class="sidebar-user">Login: <strong><?= e($_SESSION['admin_nama'] ?? 'Admin') ?></strong></div>
         <div class="sidebar-actions">
           <a href="../index.php" class="btn btn-sm">Bilik Suara</a>
-          <a href="logout.php" class="btn btn-sm btn-danger">Keluar</a>
+          <form method="post" action="logout.php" style="display: contents;">
+            <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
+            <button type="submit" class="btn btn-sm btn-danger">Keluar</button>
+          </form>
         </div>
       </div>
     </aside>
@@ -406,7 +447,7 @@ if (isset($_GET['ajax'])) {
                 </tr>
               </thead>
               <tbody id="token-table-body" data-token-sig="<?= e($tokenSig) ?>">
-                <?= render_token_rows($tokenList, $offset, $activeCsrf) ?>
+                <?= render_token_rows($tokenList, $offset, $activeCsrf, $statusFilter, $searchQuery, $currentPage) ?>
               </tbody>
             </table>
           </div>
@@ -443,7 +484,13 @@ if (isset($_GET['ajax'])) {
           },
           intervalMs: 1500,
           onData: function (data) {
+            if (data.tema) {
+              document.documentElement.setAttribute('data-theme', data.tema);
+            }
             if (!data.changed) return;
+            if (data.current_page) {
+              pageNum = data.current_page;
+            }
             tbody.dataset.tokenSig = data.sig;
             tbody.innerHTML = data.rows_html;
             if (footerWrap) footerWrap.innerHTML = data.footer_html;

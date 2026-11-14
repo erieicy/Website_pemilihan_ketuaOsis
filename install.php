@@ -35,6 +35,57 @@ $isLocked   = file_exists($lockFile);
 $error   = '';
 $success = false;
 
+// Validasi integritas instalasi ketika installed.lock ditemukan (mencegah deadlock jika DB/tabel hilang atau admin kosong)
+if ($isLocked) {
+    try {
+        if (file_exists($configFile)) {
+            require_once $configFile;
+        }
+        $iHost = defined('DB_HOST') ? DB_HOST : 'localhost';
+        $iUser = defined('DB_USER') ? DB_USER : 'root';
+        $iPass = defined('DB_PASS') ? DB_PASS : '';
+        $iName = defined('DB_NAME') ? DB_NAME : 'db_evoting_osis';
+
+        $pdoIntegrity = new PDO("mysql:host={$iHost};charset=utf8mb4", $iUser, $iPass, [
+            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES   => false,
+        ]);
+
+        $stmtSchema = $pdoIntegrity->prepare('SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ? LIMIT 1');
+        $stmtSchema->execute([$iName]);
+        if (!$stmtSchema->fetchColumn()) {
+            @unlink($lockFile);
+            $isLocked = false;
+        } else {
+            $iNameQuoted = str_replace('`', '``', $iName);
+            $pdoIntegrity->exec("USE `{$iNameQuoted}`");
+            $existingTables = array_map('strtolower', $pdoIntegrity->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN));
+            $requiredTables = ['pengaturan', 'admin', 'kandidat', 'tokens'];
+            if (count(array_intersect($requiredTables, $existingTables)) < count($requiredTables)) {
+                @unlink($lockFile);
+                $isLocked = false;
+            } else {
+                $adminCount = (int)$pdoIntegrity->query('SELECT COUNT(*) FROM `admin`')->fetchColumn();
+                if ($adminCount < 1) {
+                    @unlink($lockFile);
+                    $isLocked = false;
+                }
+            }
+        }
+        $pdoIntegrity = null;
+    } catch (PDOException $e) {
+        error_log('Install integrity check error: ' . $e->getMessage());
+        $errCode = (int)($e->errorInfo[1] ?? $e->getCode());
+        if ($errCode === 1049) {
+            @unlink($lockFile);
+            $isLocked = false;
+        } else {
+            $error = 'Tidak dapat terhubung ke layanan MySQL/MariaDB. Pastikan layanan database aktif.';
+        }
+    }
+}
+
 function h($s): string {
     return htmlspecialchars((string)($s ?? ''), ENT_QUOTES, 'UTF-8');
 }
@@ -50,24 +101,59 @@ function install_verify_csrf(?string $token): bool {
     return !empty($_SESSION['csrf_token']) && !empty($token) && hash_equals($_SESSION['csrf_token'], $token);
 }
 
-function install_get_rate_limit_data(string $bucket, int $maxAttempts, int $now): array {
-    $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
-    $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
-    $default = ['count' => 0, 'expires' => 0, 'window_expires' => 0];
-    if (is_file($file)) {
-        $raw = @file_get_contents($file);
-        $dec = $raw ? @json_decode($raw, true) : null;
-        if (is_array($dec) && isset($dec['count'], $dec['expires'])) {
-            $count   = (int)($dec['count'] ?? 0);
-            $expires = (int)($dec['expires'] ?? 0);
-            $winExp  = (int)($dec['window_expires'] ?? $expires);
-            $isActive = ($count >= $maxAttempts) ? ($expires > $now) : ($winExp > $now);
-            if ($isActive) {
-                return ['count' => $count, 'expires' => $expires, 'window_expires' => $winExp];
-            }
+function install_rate_limit_file_path(string $bucket): string {
+    $ip = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+    return rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
+}
+
+function install_select_active_rate_limit(array $candidates, int $maxAttempts, int $now): array {
+    $best = ['count' => 0, 'expires' => 0, 'window_expires' => 0];
+    foreach ($candidates as $item) {
+        if (!is_array($item) || !isset($item['count'], $item['expires'])) {
+            continue;
+        }
+        $count   = (int)$item['count'];
+        $expires = (int)$item['expires'];
+        $winExp  = (int)($item['window_expires'] ?? $expires);
+
+        $isActive = ($count >= $maxAttempts) ? ($expires > $now) : ($winExp > $now);
+        if ($isActive && $count > $best['count']) {
+            $best = [
+                'count'          => $count,
+                'expires'        => $expires,
+                'window_expires' => $winExp,
+            ];
         }
     }
-    return $default;
+    return $best;
+}
+
+function install_get_rate_limit_data(string $bucket, int $maxAttempts, int $now): array {
+    $file       = install_rate_limit_file_path($bucket);
+    $candidates = [];
+
+    if (is_file($file)) {
+        $raw = false;
+        $fp  = @fopen($file, 'rb');
+        if ($fp !== false) {
+            if (@flock($fp, LOCK_SH)) {
+                $raw = stream_get_contents($fp);
+                @flock($fp, LOCK_UN);
+            }
+            fclose($fp);
+        }
+        $dec = (is_string($raw) && $raw !== '') ? @json_decode($raw, true) : null;
+        if (is_array($dec)) {
+            $candidates[] = $dec;
+        }
+    }
+
+    $sessKey = 'rl_' . $bucket;
+    if (!empty($_SESSION[$sessKey]) && is_array($_SESSION[$sessKey])) {
+        $candidates[] = $_SESSION[$sessKey];
+    }
+
+    return install_select_active_rate_limit($candidates, $maxAttempts, $now);
 }
 
 function install_check_rate_limit(string $bucket, int $maxAttempts = 5, int $lockoutSeconds = 30): int {
@@ -80,25 +166,68 @@ function install_check_rate_limit(string $bucket, int $maxAttempts = 5, int $loc
 }
 
 function install_record_failed(string $bucket, int $lockoutSeconds = 30, int $maxAttempts = 5): int {
-    $now  = time();
-    $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
-    $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
-    $data = install_get_rate_limit_data($bucket, $maxAttempts, $now);
-    $data['count']++;
-    $data['window_expires'] = $now + max(60, $lockoutSeconds);
-    $data['expires']        = $now + $lockoutSeconds;
-    @file_put_contents($file, json_encode($data), LOCK_EX);
-    if ($data['count'] >= $maxAttempts) {
-        return $lockoutSeconds;
+    $now     = time();
+    $file    = install_rate_limit_file_path($bucket);
+    $sessKey = 'rl_' . $bucket;
+    $data    = ['count' => 0, 'expires' => 0, 'window_expires' => 0];
+    $updated = false;
+
+    $fp = @fopen($file, 'c+b');
+    if ($fp !== false) {
+        if (@flock($fp, LOCK_EX)) {
+            rewind($fp);
+            $raw        = stream_get_contents($fp);
+            $candidates = [];
+
+            $dec = (is_string($raw) && $raw !== '') ? @json_decode($raw, true) : null;
+            if (is_array($dec)) {
+                $candidates[] = $dec;
+            }
+            if (!empty($_SESSION[$sessKey]) && is_array($_SESSION[$sessKey])) {
+                $candidates[] = $_SESSION[$sessKey];
+            }
+
+            $data                   = install_select_active_rate_limit($candidates, $maxAttempts, $now);
+            $data['count']++;
+            $data['window_expires'] = $now + max(60, $lockoutSeconds);
+            $data['expires']        = $now + $lockoutSeconds;
+
+            ftruncate($fp, 0);
+            rewind($fp);
+            fwrite($fp, json_encode($data));
+            fflush($fp);
+            @flock($fp, LOCK_UN);
+            $updated = true;
+        }
+        fclose($fp);
     }
-    return 0;
+
+    if (!$updated) {
+        $data                   = install_select_active_rate_limit([$_SESSION[$sessKey] ?? null], $maxAttempts, $now);
+        $data['count']++;
+        $data['window_expires'] = $now + max(60, $lockoutSeconds);
+        $data['expires']        = $now + $lockoutSeconds;
+    }
+
+    $_SESSION[$sessKey] = $data;
+
+    return ($data['count'] >= $maxAttempts) ? $lockoutSeconds : 0;
 }
 
 function install_clear_rate_limit(string $bucket): void {
-    $ip   = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
-    $file = rtrim(sys_get_temp_dir(), '/\\') . '/evoting_rl_' . md5($bucket . '|' . $ip) . '.json';
+    $file = install_rate_limit_file_path($bucket);
     if (is_file($file)) {
-        @file_put_contents($file, json_encode(['count' => 0, 'expires' => 0, 'window_expires' => 0]), LOCK_EX);
+        $fp = @fopen($file, 'r+b');
+        if ($fp !== false) {
+            if (@flock($fp, LOCK_EX)) {
+                ftruncate($fp, 0);
+                rewind($fp);
+                fwrite($fp, json_encode(['count' => 0, 'expires' => 0, 'window_expires' => 0]));
+                fflush($fp);
+                @flock($fp, LOCK_UN);
+            }
+            fclose($fp);
+        }
         @unlink($file);
     }
     unset($_SESSION['rl_' . $bucket]);

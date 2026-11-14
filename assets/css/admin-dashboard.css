@@ -137,6 +137,28 @@
 }
 
 @media print {
+  :root,
+  [data-theme="dark"],
+  [data-theme="light"],
+  html,
+  body {
+    --bg-page: #ffffff !important;
+    --bg-surface: #ffffff !important;
+    --bg-subtle: #f1f2f4 !important;
+    --text-main: #111215 !important;
+    --text-muted: #555a64 !important;
+    --border-color: #cccccc !important;
+    --border-strong: #999999 !important;
+    --accent-bg: #141518 !important;
+    --accent-text: #ffffff !important;
+    background-color: #ffffff !important;
+    color: #111215 !important;
+  }
+  .chart-fill {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    background-color: #141518 !important;
+  }
   .admin-sidebar, .no-print, .sidebar-open-btn { display: none !important; }
   .admin-main, body.sidebar-closed .admin-main { margin-left: 0 !important; padding: 0 !important; max-width: 100% !important; width: 100% !important; }
   .page-header { position: static !important; margin-top: 0 !important; padding-top: 0 !important; }

@@ -28,7 +28,7 @@ Aplikasi web pemungutan suara elektronik (*E-Voting*) untuk Pemilihan Ketua & Wa
 ## Struktur Direktori
 
 ```text
-Website_pemilihan_ketuaOsis/
+E-Voting-OSIS/
 ├── assets/
 │   ├── css/
 │   │   ├── base.css                # Variabel tema (White/Dark), reset, & komponen dasar
